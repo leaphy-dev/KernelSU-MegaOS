@@ -49,6 +49,11 @@ void apply_kernelsu_rules()
     struct selinux_policy *pol, *old_pol;
     struct policydb *db;
 
+    if (!ksu_shim_resolved("selinux_state")) {
+        pr_warn("kernelsu: shim 未就绪(selinux_state)，跳过 sepolicy 规则\n");
+        return;
+    }
+
     if (!getenforce()) {
         pr_info("SELinux permissive or disabled, apply rules!\n");
     }
