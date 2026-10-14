@@ -328,7 +328,7 @@ static int ksu_scan_rip_refs(unsigned long faddr, unsigned long fsize,
 		} else if (op == 0x8b || op == 0x8d || op == 0x89 || op == 0x8a ||
 			   op == 0x88 || op == 0x8c || op == 0x03 || op == 0x2b ||
 			   op == 0x39 || op == 0x3b || op == 0x84 || op == 0x85 ||
-			   op == 0xc7) {
+			   op == 0x63) {          /* 0x63 = movslq，selinux_blob_sizes 的引用形态 */
 			len = k + 6;
 		} else {
 			continue;
