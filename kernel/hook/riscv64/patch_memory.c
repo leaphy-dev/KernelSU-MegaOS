@@ -19,6 +19,8 @@
 #include "../patch_memory.h"
 #include "insn.h"
 
+#include "shim/ksu_shim.h"
+
 static unsigned long leaf_phys(unsigned long value, unsigned long addr, unsigned long mask)
 {
     return PFN_PHYS(pte_pfn(__pte(value))) + (addr & ~mask);

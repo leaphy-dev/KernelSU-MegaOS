@@ -19,6 +19,8 @@
 #include <asm/page.h>
 #include <asm/fixmap.h>
 
+#include "shim/ksu_shim.h"
+
 // --- Architecture-specific Page Table to Physical Address translation ---
 #define KSU_P4D_TO_PHYS(p4d) ((unsigned long)p4d_pfn(p4d) << PAGE_SHIFT)
 #define KSU_PUD_TO_PHYS(pud) ((unsigned long)pud_pfn(pud) << PAGE_SHIFT)

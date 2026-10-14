@@ -14,6 +14,8 @@
 #include "asm/cacheflush.h"
 #include "asm-generic/fixmap.h"
 
+#include "shim/ksu_shim.h"
+
 // https://github.com/fuqiuluo/ovo/blob/f7da411458e87d32438dc14fce5a3313ed0c967e/ovo/mmuhack.c#L21
 
 // Translate a kernel virtual address to a physical address by walking the
