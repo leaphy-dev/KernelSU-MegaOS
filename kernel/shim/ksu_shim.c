@@ -232,14 +232,20 @@ SHIM_FN(void *, symtab_search, (struct symtab *s, const char *name), (s, name), 
 /* ==================================================================
  * ③ 数据对象：运行时解析
  *
- * 本设备 CONFIG_KALLSYMS_ALL=n → 数据符号【不在 kallsyms 里】，必须另想办法：
- *   A) 引用反查：从"已知函数"的机器码里抠出 RIP 相对引用的目标
- *      （离线已在我们自己的 vmlinux 上确认了哪些非 __init 函数引用了哪个符号、
- *        访问的是哪个字段）
- *   B) 结构模式扫描：tracepoint 指针表 / proc_ns_operations 的 name 字段
+ * 本设备 CONFIG_KALLSYMS_ALL=n → 数据符号【不在 kallsyms 里】，另辟蹊径：
+ *   A) 引用反查：从"已知函数"的机器码里抠出 RIP 相对引用目标
+ *      （候选函数名单是【离线在我们自己的 vmlinux 上验证过】的）
+ *   B) 结构模式扫描：tracepoint 指针表 / proc_ns_operations
  *
- * 所有内存读取都走 copy_from_kernel_nofault()，坏指针只会返回错误、不会 oops。
- * 每个符号解析后都做【语义自检】，结果写日志，便于在设备上核对。
+ * 全部内存读取走 copy_from_kernel_nofault()，坏指针只返回错误、不会 oops。
+ * 每个符号解析后都做语义自检，结果打印到日志，便于在设备上核对。
+ *
+ * 离线验证结果（在已知真值的内核上跑同一套逻辑）：
+ *   init_mm            ← lookup_address        ★
+ *   selinux_state      ← avc_denied            ★
+ *   selinux_blob_sizes ← selinux_syslog        ★
+ *   mntns_operations   ← .rodata 模式扫描       ★
+ *   __tracepoint_sys_enter ← 指针表遍历         ★
  * ================================================================== */
 
 static inline bool ksu_is_kptr(unsigned long v)
@@ -285,19 +291,16 @@ static bool ksu_is_text(unsigned long v)
 	return v >= lo && v < hi;
 }
 
-/* 扫描函数机器码里所有 RIP 相对引用的目标地址
- * 支持的编码形态（覆盖我们离线确认过的所有引用点）：
- *   无 REX            : 8b/8d/89/8a/88/8c/03/2b/39/3b/84/85/c7   disp32
- *   REX (0x40-0x4f)   : 同上
- *   两字节 opcode     : 0f b6/b7/be/bf                           disp32
- * 指令长度：disp32 在末尾，故 len = 前缀 + opcode + modrm + 4
+/*
+ * 扫描函数机器码里所有 RIP 相对引用的目标地址。
+ * 支持的编码形态（覆盖离线确认过的全部引用点）：
+ *   可选 REX(0x40-0x4f) + {8b,8d,89,8a,88,8c,03,2b,39,3b,84,85,63} + modrm(rip) + disp32
+ *   可选 REX            + 0f {b6,b7,be,bf}                           + modrm(rip) + disp32
+ * 其中 0x63=movslq（selinux_blob_sizes 的引用形态）。
+ * 不要用 c7/83：它们带立即数，disp32 不在末尾，长度计算会错。
  */
-#define KSU_MAX_REFS 64
-
-static bool ksu_has_rip_modrm(const u8 *q, unsigned long len)
-{
-	return (q[len - 5] & 0xc7) == 0x05;      /* mod=00, rm=101 */
-}
+#define KSU_MAX_REFS  64
+#define KSU_MAX_CANDS 256
 
 static int ksu_scan_rip_refs(unsigned long faddr, unsigned long fsize,
 			     unsigned long *out, int max)
@@ -306,29 +309,31 @@ static int ksu_scan_rip_refs(unsigned long faddr, unsigned long fsize,
 	int n = 0;
 	unsigned long i;
 
-	if (!ksu_is_kptr(faddr) || !fsize || fsize > 0x100000)
+	if (!ksu_is_kptr(faddr) || !fsize || fsize > 0x100000UL)
 		return 0;
 
 	for (i = 0; i + 6 <= fsize && n < max; i++) {
 		const u8 *q = p + i;
-		unsigned long len = 0, k = 0;
+		unsigned long len, k = 0;
 		u8 op;
 
-		if (q[0] >= 0x40 && q[0] <= 0x4f)       /* 可选 REX 前缀 */
+		if (q[0] >= 0x40 && q[0] <= 0x4f)
 			k = 1;
 		if (i + k + 2 > fsize)
 			break;
 		op = q[k];
 
-		if (op == 0x0f) {                        /* 两字节 opcode */
+		if (op == 0x0f) {
 			u8 op2 = q[k + 1];
-			if (!(op2 == 0xb6 || op2 == 0xb7 || op2 == 0xbe || op2 == 0xbf))
+
+			if (!(op2 == 0xb6 || op2 == 0xb7 ||
+			      op2 == 0xbe || op2 == 0xbf))
 				continue;
 			len = k + 7;
 		} else if (op == 0x8b || op == 0x8d || op == 0x89 || op == 0x8a ||
 			   op == 0x88 || op == 0x8c || op == 0x03 || op == 0x2b ||
 			   op == 0x39 || op == 0x3b || op == 0x84 || op == 0x85 ||
-			   op == 0x63) {          /* 0x63 = movslq，selinux_blob_sizes 的引用形态 */
+			   op == 0x63) {
 			len = k + 6;
 		} else {
 			continue;
@@ -336,11 +341,10 @@ static int ksu_scan_rip_refs(unsigned long faddr, unsigned long fsize,
 
 		if (i + len > fsize)
 			break;
-		if (!ksu_has_rip_modrm(q, len))
+		if ((q[len - 5] & 0xc7) != 0x05)      /* mod=00, rm=101 → RIP 相对 */
 			continue;
 
 		{
-			/* disp32 贴着操作数末尾（对 0f b6 也成立：modrm 后就 disp32） */
 			const u8 *d = q + (op == 0x0f ? (k + 3) : (k + 2));
 			s32 disp = (s32)((u32)d[0] | ((u32)d[1] << 8) |
 					 ((u32)d[2] << 16) | ((u32)d[3] << 24));
@@ -359,12 +363,13 @@ static int ksu_refs_of(const char *fname, unsigned long *out, int max)
 
 	if (!a)
 		return 0;
-	if (!kallsyms_lookup_size_offset(a, &sz, &off) || sz == 0 || sz > 0x40000)
-		sz = 0x800;                              /* 拿不到大小就只扫函数头 */
+	if (!kallsyms_lookup_size_offset(a, &sz, &off) || sz == 0 || sz > 0x40000UL)
+		sz = 0x800;                           /* 拿不到大小就只扫函数头部 */
 	return ksu_scan_rip_refs(a, sz, out, max);
 }
 
-/* ---------------- init_mm ---------------- */
+/* ---------------- 校验函数（全部用安全读） ---------------- */
+
 static bool ksu_valid_init_mm(unsigned long cand)
 {
 	unsigned long a = (unsigned long)&ksu_valid_init_mm;
@@ -373,7 +378,6 @@ static bool ksu_valid_init_mm(unsigned long cand)
 
 	if (!ksu_is_kptr(cand))
 		return false;
-	/* 全部用安全读，坏指针只返回错误，不会 oops */
 	if (ksu_safe_read(&pgd_p, (const void *)(cand + offsetof(struct mm_struct, pgd)), 8) < 0)
 		return false;
 	if (!ksu_is_kptr(pgd_p))
@@ -384,28 +388,6 @@ static bool ksu_valid_init_mm(unsigned long cand)
 	return !pgd_none(pgd) && !pgd_bad(pgd);
 }
 
-static unsigned long ksu_resolve_init_mm(void)
-{
-	static const char *cands[] = {
-		"lookup_address", "slow_virt_to_phys", "vmalloc_to_page",
-		"set_pte_vaddr", "drain_mmlist", "__get_user_pages",
-	};
-	unsigned long refs[KSU_MAX_REFS];
-	int i, k, n;
-
-	for (i = 0; i < ARRAY_SIZE(cands); i++) {
-		n = ksu_refs_of(cands[i], refs, KSU_MAX_REFS);
-		for (k = 0; k < n; k++) {
-			unsigned long base =
-				refs[k] - offsetof(struct mm_struct, pgd);
-			if (ksu_valid_init_mm(base))
-				return base;
-		}
-	}
-	return 0;
-}
-
-/* ---------------- selinux_state ---------------- */
 static bool ksu_valid_selinux_state(unsigned long cand)
 {
 	struct selinux_state s;
@@ -416,30 +398,9 @@ static bool ksu_valid_selinux_state(unsigned long cand)
 		return false;
 	if (s.initialized != true || s.enforcing > 1)
 		return false;
-	if (!ksu_is_kptr((unsigned long)s.policy))
-		return false;
-	return true;
+	return ksu_is_kptr((unsigned long)s.policy);
 }
 
-static unsigned long ksu_resolve_selinux_state(void)
-{
-	static const char *cands[] = { "avc_denied", "sel_read_enforce", "selinux_add_opt" };
-	unsigned long refs[KSU_MAX_REFS];
-	int i, k, n;
-
-	for (i = 0; i < ARRAY_SIZE(cands); i++) {
-		n = ksu_refs_of(cands[i], refs, KSU_MAX_REFS);
-		for (k = 0; k < n; k++)
-			if (ksu_valid_selinux_state(refs[k]))
-				return refs[k];
-	}
-	return 0;
-}
-
-/* ---------------- selinux_blob_sizes -----------------
- * 它被 objsec.h 的内联函数引用，因此模块里已有同名【真对象】，
- * 这里找到内核里的真值后【拷贝】进来即可（blob 尺寸初始化后不再变）。
- */
 static bool ksu_valid_blob_sizes(unsigned long cand)
 {
 	int v[14];
@@ -458,25 +419,84 @@ static bool ksu_valid_blob_sizes(unsigned long cand)
 	return ok >= 1;
 }
 
-static unsigned long ksu_resolve_blob_sizes(void)
-{
-	static const char *cands[] = { "selinux_syslog", "selinux_capset", "selinux_bpf",
-				       "sel_write_bool", "sel_write_load", "selinux_bpf_map" };
-	unsigned long refs[KSU_MAX_REFS];
-	int i, k, n;
+/* ---------------- 投票：多个函数共同指向同一地址才优先采纳 ---------------- */
 
-	for (i = 0; i < ARRAY_SIZE(cands); i++) {
-		n = ksu_refs_of(cands[i], refs, KSU_MAX_REFS);
-		for (k = 0; k < n; k++)
-			if (ksu_valid_blob_sizes(refs[k]))
-				return refs[k];
+static unsigned long ksu_pick_by_vote(unsigned long *c, int n,
+				      bool (*valid)(unsigned long), int min_votes)
+{
+	int i, j, best = 0;
+	unsigned long bestv = 0;
+
+	for (i = 0; i < n; i++) {
+		int cnt = 0;
+
+		if (!c[i])
+			continue;
+		for (j = 0; j < n; j++)
+			if (c[j] == c[i])
+				cnt++;
+		if (cnt >= min_votes && cnt > best && valid(c[i])) {
+			best = cnt;
+			bestv = c[i];
+		}
 	}
-	return 0;
+	return bestv;
 }
 
-/* ---------------- mntns_operations ----------------
- * 文本段里没有任何直接引用（只被数据数组引用），因此扫描 .rodata：
- * 找 {name, real_ns_name, type, get, put, install, ...} 中 name=="mnt" 的那一个。
+static unsigned long ksu_resolve_by_refs(const char *const *fns, int nfns, long adjust,
+					 bool (*valid)(unsigned long))
+{
+	static unsigned long cands[KSU_MAX_CANDS];
+	unsigned long refs[KSU_MAX_REFS];
+	int i, k, n, nrefs;
+	unsigned long got;
+
+	n = 0;
+	for (i = 0; i < nfns && n < KSU_MAX_CANDS; i++) {
+		nrefs = ksu_refs_of(fns[i], refs, KSU_MAX_REFS);
+		for (k = 0; k < nrefs && n < KSU_MAX_CANDS; k++)
+			cands[n++] = refs[k] + adjust;
+	}
+	got = ksu_pick_by_vote(cands, n, valid, 2);
+	if (!got)
+		got = ksu_pick_by_vote(cands, n, valid, 1);
+	return got;
+}
+
+/* ---------------- 各符号的解析 ---------------- */
+
+static unsigned long ksu_resolve_init_mm(void)
+{
+	static const char *fns[] = {
+		"lookup_address", "slow_virt_to_phys", "vmalloc_to_page",
+		"set_pte_vaddr", "drain_mmlist", "__get_user_pages",
+	};
+
+	return ksu_resolve_by_refs(fns, ARRAY_SIZE(fns),
+				   -(long)offsetof(struct mm_struct, pgd),
+				   ksu_valid_init_mm);
+}
+
+static unsigned long ksu_resolve_selinux_state(void)
+{
+	static const char *fns[] = { "avc_denied", "sel_read_enforce", "selinux_add_opt" };
+
+	return ksu_resolve_by_refs(fns, ARRAY_SIZE(fns), 0, ksu_valid_selinux_state);
+}
+
+static unsigned long ksu_resolve_blob_sizes(void)
+{
+	static const char *fns[] = { "selinux_syslog", "selinux_capset", "selinux_bpf",
+				     "sel_write_bool", "sel_write_load", "selinux_bpf_map" };
+
+	return ksu_resolve_by_refs(fns, ARRAY_SIZE(fns), 0, ksu_valid_blob_sizes);
+}
+
+/*
+ * mntns_operations：文本段里零直接引用（只被数据数组引用），所以扫 .rodata：
+ * 找 {name, real_ns_name, type, get, put, install, ...} 中 name=="mnt" 且
+ * +0x18/+0x20/+0x28 都是文本指针的那一个。
+ * 注意 real_ns_name 通常是 NULL（没有 real 变体），不能要求它等于 "mnt"。
  */
 static unsigned long ksu_resolve_mntns_operations(void)
 {
@@ -495,11 +515,11 @@ static unsigned long ksu_resolve_mntns_operations(void)
 			continue;
 		if (ksu_safe_read(&real, (const void *)(a + 8), 8) < 0)
 			continue;
-		if (!ksu_str_eq(real, "mnt"))
+		if (real && !ksu_is_kptr(real))
 			continue;
-		if (ksu_safe_read(&get, (const void *)(a + 24), 8) < 0 ||
-		    ksu_safe_read(&put, (const void *)(a + 32), 8) < 0 ||
-		    ksu_safe_read(&install, (const void *)(a + 40), 8) < 0)
+		if (ksu_safe_read(&get, (const void *)(a + 0x18), 8) < 0 ||
+		    ksu_safe_read(&put, (const void *)(a + 0x20), 8) < 0 ||
+		    ksu_safe_read(&install, (const void *)(a + 0x28), 8) < 0)
 			continue;
 		if (!ksu_is_text(get) || !ksu_is_text(put) || !ksu_is_text(install))
 			continue;
@@ -510,9 +530,9 @@ static unsigned long ksu_resolve_mntns_operations(void)
 	return 0;
 }
 
-/* ---------------- __tracepoint_sys_enter ----------------
- * 用 __start___tracepoints_ptrs（__start_ 前缀 → 在 kallsyms 里）
- * 遍历指针表（PREL32 相对偏移），比对 tp->name == "sys_enter"。
+/*
+ * __tracepoint_sys_enter：遍历 __start___tracepoints_ptrs
+ * （__start_ 前缀 → 在 kallsyms 里），元素是 PREL32 相对偏移，比对 tp->name。
  */
 static unsigned long ksu_resolve_tracepoint_sys_enter(void)
 {
@@ -529,7 +549,7 @@ static unsigned long ksu_resolve_tracepoint_sys_enter(void)
 
 		if (ksu_safe_read(&off, (const void *)p, 4) < 0)
 			break;
-		tp = (unsigned long)((long)p + off);     /* PREL32：相对自身 */
+		tp = (unsigned long)((long)p + off);   /* PREL32：相对自身 */
 		if (!ksu_is_kptr(tp))
 			continue;
 		if (ksu_safe_read(&nm, (const void *)tp, 8) < 0)
@@ -550,13 +570,44 @@ static struct {
 	unsigned long cached;
 	bool done;
 } ksu_data_resolvers[] = {
-	{ "init_mm",                ksu_resolve_init_mm,                0, false },
-	{ "selinux_state",          ksu_resolve_selinux_state,          0, false },
-	{ "selinux_blob_sizes",     ksu_resolve_blob_sizes,             0, false },
-	{ "mntns_operations",       ksu_resolve_mntns_operations,       0, false },
-	{ "__tracepoint_sys_enter", ksu_resolve_tracepoint_sys_enter,   0, false },
+	{ "init_mm",                ksu_resolve_init_mm,               0, false },
+	{ "selinux_state",          ksu_resolve_selinux_state,         0, false },
+	{ "selinux_blob_sizes",     ksu_resolve_blob_sizes,            0, false },
+	{ "mntns_operations",       ksu_resolve_mntns_operations,      0, false },
+	{ "__tracepoint_sys_enter", ksu_resolve_tracepoint_sys_enter,  0, false },
 };
 
+unsigned long ksu_shim_data_addr(const char *name)
+{
+	unsigned long addr;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ksu_data_resolvers); i++) {
+		if (strcmp(ksu_data_resolvers[i].name, name) != 0)
+			continue;
+		if (!ksu_data_resolvers[i].done) {
+			ksu_data_resolvers[i].done = true;
+			addr = find_kernel_symbol_exact(name);   /* 若将来开了 KALLSYMS_ALL */
+			if (!addr)
+				addr = ksu_data_resolvers[i].resolve();
+			ksu_data_resolvers[i].cached = addr;
+			if (addr)
+				pr_info("ksu-shim: 数据符号 %s 解析成功 @%lx\n", name, addr);
+			else
+				pr_warn("ksu-shim: 数据符号 %s 解析失败（使用哑对象）\n", name);
+		}
+		return ksu_data_resolvers[i].cached;
+	}
+	pr_warn_once("ksu-shim: 未知数据符号 %s\n", name);
+	return 0;
+}
+
+bool ksu_shim_resolved(const char *name)
+{
+	return ksu_shim_data_addr(name) != 0;
+}
+
+/* selinux_blob_sizes 解析成功后，把内核里的真值拷进模块内的真对象 */
 static void ksu_shim_post_init(void)
 {
 	unsigned long real;
@@ -574,50 +625,21 @@ static void ksu_shim_post_init(void)
 	}
 }
 
-unsigned long ksu_shim_data_addr(const char *name)
-{
-	unsigned long addr;
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(ksu_data_resolvers); i++) {
-		if (strcmp(ksu_data_resolvers[i].name, name) != 0)
-			continue;
-		if (!ksu_data_resolvers[i].done) {
-			ksu_data_resolvers[i].done = true;
-			addr = find_kernel_symbol_exact(name);      /* 若将来开了 KALLSYMS_ALL */
-			if (!addr)
-				addr = ksu_data_resolvers[i].resolve();
-			ksu_data_resolvers[i].cached = addr;
-			if (addr)
-				pr_info("ksu-shim: 数据符号 %s 解析成功 @%lx\n", name, addr);
-			else
-				pr_warn("ksu-shim: 数据符号 %s 解析失败（将使用哑对象）\n", name);
-		}
-		return ksu_data_resolvers[i].cached;
-	}
-	pr_warn_once("ksu-shim: 未知数据符号 %s\n", name);
-	return 0;
-}
-
-bool ksu_shim_resolved(const char *name)
-{
-	return ksu_shim_data_addr(name) != 0;
-}
-
-/* 哑对象：保证解析失败时不空指针崩溃 */
+/* 哑对象：解析失败时使用它们，保证不空指针崩溃 */
 struct selinux_state ksu_dummy_selinux_state;
 struct lsm_blob_sizes ksu_dummy_selinux_blob_sizes;
 struct mm_struct ksu_dummy_init_mm;
 const struct proc_ns_operations ksu_dummy_mntns_operations;
 
-/* init_mm 哑对象：给它一张清零页当 pgd → pgd_none() 为真 → KSU 走失败分支，不会 oops */
+/* init_mm 哑对象：给一张清零页当 pgd → pgd_none() 为真 → KSU 走失败分支，不 oops */
 static pgd_t *ksu_dummy_pgd;
 
 void *ksu_shim_data_or_dummy(const char *name, void *dummy)
 {
-	unsigned long a = ksu_shim_data_addr(name);
+	unsigned long a;
 
 	ksu_shim_post_init();
+	a = ksu_shim_data_addr(name);
 
 	if (a)
 		return (void *)a;
@@ -634,12 +656,9 @@ void *ksu_shim_data_or_dummy(const char *name, void *dummy)
 }
 
 /* ------------------------------------------------------------------
- * selinux_blob_sizes 需要【模块内真对象】（objsec.h 内联函数引用它，宏够不着）
+ * 这两个被【头文件里的内联函数/宏】引用，#define 够不着，所以用模块内真对象：
+ *   selinux_blob_sizes    ← objsec.h 的 selinux_cred() 等内联
+ *   __tracepoint_sys_enter ← <trace/events/syscalls.h> 的 tracepoint 宏
  * ------------------------------------------------------------------ */
 struct lsm_blob_sizes selinux_blob_sizes;
-
-/* ------------------------------------------------------------------
- * __tracepoint_sys_enter 同样被头文件里的 tracepoint 宏引用，
- * 先放模块内对象让链接通过；Phase 5 会改用 ksu_shim_data_addr() 取真地址。
- * ------------------------------------------------------------------ */
 struct tracepoint __tracepoint_sys_enter;
