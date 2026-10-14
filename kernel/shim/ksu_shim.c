@@ -662,3 +662,26 @@ void *ksu_shim_data_or_dummy(const char *name, void *dummy)
  * ------------------------------------------------------------------ */
 struct lsm_blob_sizes selinux_blob_sizes;
 struct tracepoint __tracepoint_sys_enter;
+
+/* ==================================================================
+ * ⑤ 绕过符号版本(CRC)校验
+ *
+ * 本设备 CONFIG_MODVERSIONS=y 且 MODULE_FORCE_LOAD 未开：正常情况下模块里
+ * 每个被引用符号的 CRC 都必须与内核一致，否则 insmod 直接失败
+ * （而没 root 就没法在设备上试错）。
+ *
+ * 但 kernel/module/version.c 的 check_version() 有这样一段：
+ *     if (info->index.vers_ext_crc) {
+ *             for_each_modversion_info_ext(...) { 只有名字匹配才比对 CRC }
+ *             pr_warn_once("no extended symbol version for %s");
+ *             return 1;          // ★ 名字不在列表里 → 直接放行
+ *     }
+ * 所以只要让模块里【存在】__version_ext_crcs 段、且不列出任何被引用的符号，
+ * 所有版本校验（含 module_layout）都会放行。
+ * 代价：失去"ABI 不一致就拒绝加载"这层保护（本机配置/头文件与设备同源，风险低），
+ *       并且每个符号会在 dmesg 留一行 once 警告（正好当清单用）。
+ * ================================================================== */
+static const u32 ksu_version_ext_crcs[] __used
+	__section("__version_ext_crcs") = { 0x5eed5eedu };
+static const char ksu_version_ext_names[] __used
+	__section("__version_ext_names") = "ksu_shim_placeholder_never_matches";
