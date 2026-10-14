@@ -285,8 +285,20 @@ static bool ksu_is_text(unsigned long v)
 	return v >= lo && v < hi;
 }
 
-/* 扫描函数机器码里所有 RIP 相对引用的目标地址 */
+/* 扫描函数机器码里所有 RIP 相对引用的目标地址
+ * 支持的编码形态（覆盖我们离线确认过的所有引用点）：
+ *   无 REX            : 8b/8d/89/8a/88/8c/03/2b/39/3b/84/85/c7   disp32
+ *   REX (0x40-0x4f)   : 同上
+ *   两字节 opcode     : 0f b6/b7/be/bf                           disp32
+ * 指令长度：disp32 在末尾，故 len = 前缀 + opcode + modrm + 4
+ */
 #define KSU_MAX_REFS 64
+
+static bool ksu_has_rip_modrm(const u8 *q, unsigned long len)
+{
+	return (q[len - 5] & 0xc7) == 0x05;      /* mod=00, rm=101 */
+}
+
 static int ksu_scan_rip_refs(unsigned long faddr, unsigned long fsize,
 			     unsigned long *out, int max)
 {
@@ -297,26 +309,46 @@ static int ksu_scan_rip_refs(unsigned long faddr, unsigned long fsize,
 	if (!ksu_is_kptr(faddr) || !fsize || fsize > 0x100000)
 		return 0;
 
-	for (i = 0; i + 7 <= fsize && n < max; i++) {
+	for (i = 0; i + 6 <= fsize && n < max; i++) {
 		const u8 *q = p + i;
-		s32 d;
-		unsigned long t;
+		unsigned long len = 0, k = 0;
+		u8 op;
 
-		if (q[0] < 0x48 || q[0] > 0x4f)          /* REX.W */
-			continue;
-		switch (q[1]) {                          /* 常见含内存操作数的 opcode */
-		case 0x8b: case 0x8d: case 0x89: case 0x03:
-		case 0x2b: case 0x39: case 0x3b: case 0xc7:
+		if (q[0] >= 0x40 && q[0] <= 0x4f)       /* 可选 REX 前缀 */
+			k = 1;
+		if (i + k + 2 > fsize)
 			break;
-		default:
+		op = q[k];
+
+		if (op == 0x0f) {                        /* 两字节 opcode */
+			u8 op2 = q[k + 1];
+			if (!(op2 == 0xb6 || op2 == 0xb7 || op2 == 0xbe || op2 == 0xbf))
+				continue;
+			len = k + 7;
+		} else if (op == 0x8b || op == 0x8d || op == 0x89 || op == 0x8a ||
+			   op == 0x88 || op == 0x8c || op == 0x03 || op == 0x2b ||
+			   op == 0x39 || op == 0x3b || op == 0x84 || op == 0x85 ||
+			   op == 0xc7) {
+			len = k + 6;
+		} else {
 			continue;
 		}
-		if ((q[2] & 0xc7) != 0x05)               /* mod=00, rm=101 → RIP 相对 */
+
+		if (i + len > fsize)
+			break;
+		if (!ksu_has_rip_modrm(q, len))
 			continue;
-		d = (s32)((u32)q[3] | ((u32)q[4] << 8) | ((u32)q[5] << 16) | ((u32)q[6] << 24));
-		t = (unsigned long)(q + 7) + (long)d;
-		if (ksu_is_kptr(t))
-			out[n++] = t;
+
+		{
+			/* disp32 贴着操作数末尾（对 0f b6 也成立：modrm 后就 disp32） */
+			const u8 *d = q + (op == 0x0f ? (k + 3) : (k + 2));
+			s32 disp = (s32)((u32)d[0] | ((u32)d[1] << 8) |
+					 ((u32)d[2] << 16) | ((u32)d[3] << 24));
+			unsigned long t = (unsigned long)(q + len) + (long)disp;
+
+			if (ksu_is_kptr(t))
+				out[n++] = t;
+		}
 	}
 	return n;
 }
@@ -335,14 +367,19 @@ static int ksu_refs_of(const char *fname, unsigned long *out, int max)
 /* ---------------- init_mm ---------------- */
 static bool ksu_valid_init_mm(unsigned long cand)
 {
-	struct mm_struct *mm;
-	pgd_t pgd;
 	unsigned long a = (unsigned long)&ksu_valid_init_mm;
+	unsigned long pgd_p;
+	pgd_t pgd;
 
-	mm = (struct mm_struct *)cand;
-	if (!ksu_is_kptr(cand) || !ksu_is_kptr((unsigned long)mm->pgd))
+	if (!ksu_is_kptr(cand))
 		return false;
-	if (ksu_safe_read(&pgd, (const void *)pgd_offset(mm, a), sizeof(pgd)) < 0)
+	/* 全部用安全读，坏指针只返回错误，不会 oops */
+	if (ksu_safe_read(&pgd_p, (const void *)(cand + offsetof(struct mm_struct, pgd)), 8) < 0)
+		return false;
+	if (!ksu_is_kptr(pgd_p))
+		return false;
+	if (ksu_safe_read(&pgd, (const void *)(pgd_p + pgd_index(a) * sizeof(pgd_t)),
+			  sizeof(pgd)) < 0)
 		return false;
 	return !pgd_none(pgd) && !pgd_bad(pgd);
 }
