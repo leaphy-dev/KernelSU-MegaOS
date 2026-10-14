@@ -8,6 +8,7 @@
 
 unsigned long ksu_shim_data_addr(const char *name);
 void *ksu_shim_data_or_dummy(const char *name, void *dummy);
+bool ksu_shim_resolved(const char *name);
 
 extern struct selinux_state ksu_dummy_selinux_state;
 extern struct lsm_blob_sizes ksu_dummy_selinux_blob_sizes;
