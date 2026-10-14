@@ -1,0 +1,13 @@
+# 内核模块构建产物
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+.*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+*.order
+# 其他
+__pycache__/
