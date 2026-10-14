@@ -6,6 +6,8 @@
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
 
+#include "shim/ksu_shim.h"
+
 /*
  * Cached SID values for frequently checked contexts.
  * These are resolved once at init and used for fast u32 comparison

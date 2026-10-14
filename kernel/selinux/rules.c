@@ -15,6 +15,8 @@
 #include "linux/lsm_audit.h" // IWYU pragma: keep
 #include "xfrm.h"
 
+#include "shim/ksu_shim.h"
+
 struct selinux_policy *backup_sepolicy;
 
 #define SELINUX_POLICY_INSTEAD_SELINUX_SS
