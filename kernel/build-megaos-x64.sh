@@ -13,9 +13,9 @@
 #      CRC 比对，H3C MegaBook 14 没有 __crc_* ⇒ 不清零则 insmod 直接失败
 #
 # 用法：
-#   ./build-megaos-x64.sh                 # 默认（hook manager 启用，无诊断）
-#   ./build-megaos-x64.sh --diag          # 打开 KSU_X86_BLACKBOX（心跳/panic 转储）
-#   ./build-megaos-x64.sh --no-hookmgr    # 跳过 syscall hook manager（排障）
+#   ./build-megaos-x64.sh                     # 默认：persistent 日志开，无 panic 转储
+#   ./build-megaos-x64.sh --no-persist-log    # 关闭 KSU_X86_PERSISTENT_BOOT_LOG（no-op）
+#   ./build-megaos-x64.sh --diag              # 打开 KSU_X86_BLACKBOX（panic 转储）
 #   ./build-megaos-x64.sh --out /tmp/kernelsu.ko
 #   KDIR=/path/to/kernel ./build-megaos-x64.sh
 # ============================================================================
@@ -26,14 +26,15 @@ ODIR=${ODIR:-$MDIR}
 KDIR=${KDIR:-$HOME/megabook/ack}
 
 DIAG=0
-HOOKMGR=1
+PERSIST_LOG=1
 OUT=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --diag)       DIAG=1 ;;
-        --no-hookmgr) HOOKMGR=0 ;;
-        --out)        OUT="${2:-}"; shift ;;
+        --diag)             DIAG=1 ;;
+        --persist-log)      PERSIST_LOG=1 ;;
+        --no-persist-log)   PERSIST_LOG=0 ;;
+        --out)              OUT="${2:-}"; shift ;;
         -h|--help)    sed -n '2,26p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -41,8 +42,8 @@ while [ $# -gt 0 ]; do
 done
 
 FLAGS="-DKSU_X86_SKIP_SYMBOL_RESOLVER_INIT -DKSU_X86_PATCH_VIA_SETMEMORY2"
-[ "$HOOKMGR" = 1 ] || FLAGS="$FLAGS -DKSU_X86_SKIP_HOOK_MANAGER"
-[ "$DIAG" = 1 ]    && FLAGS="$FLAGS -DKSU_X86_BLACKBOX"
+[ "$PERSIST_LOG" = 1 ] && FLAGS="$FLAGS -DKSU_X86_PERSISTENT_BOOT_LOG"
+[ "$DIAG" = 1 ] && FLAGS="$FLAGS -DKSU_X86_BLACKBOX"
 
 export ARCH=x86_64 LLVM=1 LLVM_IAS=1
 

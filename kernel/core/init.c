@@ -4,7 +4,6 @@
  *
  * 与上游的差异：
  *   - 上游只用 pr_info/pr_err 打到内核日志，必须接 adb/dmesg 才能看；
- *   - 本实现新增 ksu_blog()：把日志直接顺序写到 persistent 分区（O_SYNC），
  *     没有 adb 也能在 Windows 侧裸读，崩溃/重启都不丢；
  *   - 每行加 [秒.毫秒] 时间戳（上游没有），用于对齐崩溃前最后一条日志；
  *   - 【只保留 persistent 一个通道】：
@@ -12,10 +11,15 @@
  *       /data/local/tmp/ksu-boot.log  依赖 adb，已移除；
  *     因此不再有"通道探测/状态行"逻辑，第一条日志直接从 512KB 开始写。
  *
- * 注意：ksu_blog() 内部会 filp_open/kernel_write（可睡眠），
  *       严禁在原子上下文（tracepoint / kprobe / spinlock / irq）中调用，
  *       那种场景只能用 pr_info()。
+ *
+ *   编译期开关：KSU_X86_PERSISTENT_BOOT_LOG
+ *       定义   -> 启用 persistent 日志（build-megaos-x64.sh 默认）
+ *       未定义 -> ksu_blog() 为 no-op（build-megaos-x64.sh --no-persist-log）
  * ========================================================================== */
+#include "klog.h"
+
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/uaccess.h>
@@ -23,6 +27,7 @@
 #include <linux/slab.h>
 #include <linux/timekeeping.h>
 
+#ifdef KSU_X86_PERSISTENT_BOOT_LOG
 /* persistent 分区（1MB）：日志从 512KB 起顺序追加；
  * 静态变量每次开机归零 ⇒ 每次开机从头重写。 */
 static loff_t ksu_blog_persist_off;
@@ -65,6 +70,7 @@ void ksu_blog(const char *fmt, ...)
 
 	ksu_blog_to_persist(buf, n);
 }
+#endif /* KSU_X86_PERSISTENT_BOOT_LOG */
 
 /* ============================================================================
  * [KSU-X86-PORT] 调试日志系统到此结束。
@@ -164,15 +170,8 @@ module_param_named(bundled, ksu_bundled, bool, 0);
 #endif
 
 
-#ifdef KSU_X86_BAIL_AT
-#define KSU_BAIL(n) do { if (KSU_X86_BAIL_AT <= (n)) { pr_info("ksu-shim: BAIL@%d\n", (n)); return 0; } } while (0)
-#else
-#define KSU_BAIL(n) do { } while (0)
-#endif
-
 int  kernelsu_init(void)
 {
-    KSU_BAIL(1);
     pr_info("welcome to KernelSU version " __stringify(KERNEL_SU_VERSION) ", package name " KSU_PACKAGE_NAME "\n");
 #if defined(__x86_64__) && !defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)
     // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set
@@ -209,46 +208,28 @@ int  kernelsu_init(void)
         pr_alert("shell is allowed at init!");
     }
 
-    ksu_blog("STEP: 1 prepare_creds\n");
     ksu_cred = prepare_creds();
     if (!ksu_cred) {
         pr_err("prepare cred failed!\n");
         return -ENOSYS;
     }
 
-    KSU_BAIL(2);
-    ksu_blog("STEP: 2 init_symbol_resolver(SKIPPED)\n");
     ksu_init_symbol_resolver();
-    KSU_BAIL(3);
-    ksu_blog("STEP: 3 syscall_hook_init\n");
     ksu_syscall_hook_init();
 
-    KSU_BAIL(4);
     // Block modules early, before vendor modules are loaded in second stage.
-    ksu_blog("STEP: 4 module_blacklist_init\n");
     ksu_module_blacklist_init();
 
-    KSU_BAIL(5);
-    ksu_blog("STEP: 5 feature_init\n");
     ksu_feature_init();
-    ksu_blog("STEP: 6 sulog_init\n");
     ksu_sulog_init();
-    ksu_blog("STEP: 7 adb_root_init\n");
     ksu_adb_root_init();
-    ksu_blog("STEP: 8 lsm_hook_init\n");
     ksu_lsm_hook_init();
-    ksu_blog("STEP: 9 selinux_hide_init\n");
     ksu_selinux_hide_init();
-    ksu_blog("STEP: 10 shell_su_adb_only_init\n");
     ksu_shell_su_adb_only_init();
 
-    KSU_BAIL(6);
-    ksu_blog("STEP: 11 supercalls_init\n");
     ksu_supercalls_init();
-    ksu_blog("STEP: 12 app_profile_init\n");
     ksu_app_profile_init();
 
-    KSU_BAIL(7);
     if (ksu_late_loaded) {
         pr_info("late load mode, skipping kprobe hooks\n");
 
@@ -261,21 +242,13 @@ int  kernelsu_init(void)
         // can continue to access /data/app etc. after enforcement.
         escape_to_root_for_init();
 
-    ksu_blog("STEP: 14 allowlist_init\n");
         ksu_allowlist_init();
         ksu_load_allow_list();
 
-    ksu_blog("STEP: 13 syscall_hook_manager_init(late)\n");
-#ifndef KSU_X86_SKIP_HOOK_MANAGER
         ksu_syscall_hook_manager_init();
-#else
-        ksu_blog("STEP 13 syscall_hook_manager_init SKIPPED\n");
-#endif
 
-    ksu_blog("STEP: 15 throne_tracker_init\n");
         ksu_throne_tracker_init();
         ksu_observer_init();
-    ksu_blog("STEP: 17 file_wrapper_init\n");
         ksu_file_wrapper_init();
 
         ksu_boot_completed = true;
@@ -295,14 +268,12 @@ int  kernelsu_init(void)
 
         ksu_throne_tracker_init();
 
-    ksu_blog("STEP: 16 ksud_init\n");
-        ksu_ksud_init();    KSU_BAIL(8);
+        ksu_ksud_init();
 
 
         ksu_file_wrapper_init();
     }
 
-    KSU_BAIL(9);
 #ifdef MODULE
 #ifndef CONFIG_KSU_DEBUG
     kobject_del(&THIS_MODULE->mkobj.kobj);
@@ -361,3 +332,4 @@ MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 #else
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 #endif
+

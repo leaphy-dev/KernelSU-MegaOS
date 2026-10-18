@@ -22,10 +22,8 @@
 #include "../patch_memory.h"
 #include "arch.h"
 #include "klog.h"
-extern void ksu_blog(const char *fmt, ...);
 #include "shim/ksu_shim.h"   /* [KSU-X86-PORT] ksu_ibt_ensure_endbr */
 
-extern unsigned long ksu_disp_calls, ksu_disp_bad;   /* [KSU-X86-PORT][DIAG] */
 
 static void *ksu_tramp;                /* 原地蹦床：endbr64 + 12B 回放 + ret 回跳 */
 
@@ -65,7 +63,6 @@ long ksu_call_syscall(int nr, const struct pt_regs *regs)
  *  - prepare_abs_jump / install_abs_jump 拆分：先校验/备份，再安装
  *  - 原地蹦床（vmalloc + set_memory_x）：endbr64 + 12B 回放 + push/movabs/xchg/ret
  *  - 非 dispatcher 调用走蹦床（交回内核自己的 switch），不再自行用表派发
- *  - ksu_blog() 双通道日志（persistent@512KB / /data/local/tmp）
  * ========================================================================== */
 
 sys_call_ptr_t *ksu_syscall_table = NULL;
@@ -92,7 +89,6 @@ static int hooked_count = 0;
 
 static int patch_syscall_table(int nr, sys_call_ptr_t fn)
 {
-    ksu_blog("   patch_syscall_table: enter nr=%d\n", nr);
     if (ksu_syscall_table == NULL)
         return -ENOENT;
     if (nr < 0 || nr >= __NR_syscalls)
@@ -101,7 +97,6 @@ static int patch_syscall_table(int nr, sys_call_ptr_t fn)
     pr_info("patch syscall %d, 0x%lx -> 0x%lx\n", nr, (unsigned long)READ_ONCE(ksu_syscall_table[nr]),
             (unsigned long)fn);
 
-    ksu_blog("   patch_syscall_table: about to call ksu_patch_text dst=%lx\n", (unsigned long)&ksu_syscall_table[nr]);
     if (ksu_patch_text(&ksu_syscall_table[nr], &fn, sizeof(fn), KSU_PATCH_TEXT_FLUSH_DCACHE)) {
         pr_err("patch syscall %d failed\n", nr);
         return -EIO;
@@ -114,7 +109,6 @@ static int patch_syscall_table(int nr, sys_call_ptr_t fn)
 // save original to *old, and record for restoration at module exit.
 void ksu_syscall_table_hook(int nr, sys_call_ptr_t fn, sys_call_ptr_t *old)
 {
-    ksu_blog("   table_hook: enter nr=%d\n", nr);
     if (ksu_syscall_table == NULL)
         return;
     if (nr < 0 || nr >= __NR_syscalls) {
@@ -122,9 +116,7 @@ void ksu_syscall_table_hook(int nr, sys_call_ptr_t fn, sys_call_ptr_t *old)
         return;
     }
 
-    ksu_blog("   table_hook: locking\n");
     mutex_lock(&hooked_entries_lock);
-    ksu_blog("   table_hook: locked\n");
 
     sys_call_ptr_t orig = READ_ONCE(ksu_syscall_table[nr]);
     if (old)
@@ -149,9 +141,7 @@ void ksu_syscall_table_hook(int nr, sys_call_ptr_t fn, sys_call_ptr_t *old)
         }
     }
 
-    ksu_blog("   table_hook: calling patch_syscall_table\n");
     patch_syscall_table(nr, fn);
-    ksu_blog("   table_hook: patch_syscall_table returned\n");
 
     mutex_unlock(&hooked_entries_lock);
 }
@@ -213,11 +203,8 @@ static int ksu_find_ni_syscall_slots(int *out_slots, int max_slots)
 // otherwise it's a spurious call — return -ENOSYS.
 static long __nocfi ksu_syscall_dispatcher(const struct pt_regs *regs)
 {
-    ksu_disp_calls++;
-    if (regs->orig_ax != ksu_dispatcher_nr) {
-        ksu_disp_bad++;
+    if (regs->orig_ax != ksu_dispatcher_nr)
         return -ENOSYS;
-    }
 
     // On x86_64, orig_ax was overwritten by our tracepoint to route here.
     // The original syscall number passed by userspace is still sitting untouched in ax.
@@ -375,39 +362,16 @@ static void ksu_schedule_panic_dumper(void)
 
 static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
 {
-    /* tracepoint 重定向路径（保留兼容；本机 tracepoint 不生效，见 TPDIAG） */
+    /* tracepoint 重定向路径（上游设计，保留兼容） */
     if ((int)nr == ksu_dispatcher_nr)
         return ksu_syscall_dispatcher(regs);
 
     /* [KSU-X86-PORT] 直接派发：abs jump 已拿到真实 nr，不依赖 tracepoint。 */
-    if (unlikely(nr < __NR_syscalls && READ_ONCE(syscall_hooks[nr]) != NULL)) {
-        ksu_disp_calls++;
+    if (unlikely(nr < __NR_syscalls && READ_ONCE(syscall_hooks[nr]) != NULL))
         return ksu_syscall_dispatch_direct(nr, regs);
-    }
-    /* [KSU-X86-PORT] 管理器驱动 fd 的兜底注入：
-     * 正常路径是 hook manager 的 setresuid 钩子（ksu_handle_setresuid）注入 fd；
-     * 这里保留 execve 成功后的兜底（某些启动方式不经过 setresuid 钩子）。
-     * 没有 fd 时管理器的 C++ ksuctl() 只扫描 /proc/self/fd，扫不到就直接返回
-     * EBADF ⇒ 界面显示"未安装"。
-     * 只对管理器 uid 生效；fd 带 O_CLOEXEC，下次 exec 会自动关闭并重新注入。 */
-    if (nr == __NR_execve || nr == __NR_execveat) {
-        long ret;
-
-        if (!ksu_tramp)
-            return -ENOSYS;
-        ret = ((long (*)(const struct pt_regs *, unsigned int))ksu_tramp)(regs, nr);
-        if (ret == 0 && is_manager()) {
-            int fd = ksu_install_fd();
-            ksu_blog("SUPER: manager fd=%d pid=%d (after execve)\n", fd, current->pid);
-        }
-        return ret;
-    }
 
     /* [KSU-X86-PORT] 其余调用：走原地蹦床（回放被覆盖的 12 字节后跳回
-     * x64_sys_call+12），由内核自己的 switch 完成派发。
-     * 上游/KSU-Next 在这里用 ksu_syscall_table[nr](regs) 自行派发；
-     * H3C MegaBook 14 实测该路径会在管理器启动时整机 panic（NR/表项与生成 switch 不完全一致），
-     * 因此改为蹦床，完全不碰 sys_call_table。 */
+     * x64_sys_call+12），由内核自己的 switch 完成派发，完全不碰 sys_call_table。 */
     if (ksu_tramp)
         return ((long (*)(const struct pt_regs *, unsigned int))ksu_tramp)(regs, nr);
     return -ENOSYS;
@@ -546,22 +510,18 @@ void  __nocfi ksu_syscall_hook_init(void)
     memset(syscall_hooks, 0, sizeof(syscall_hooks));
 
     ksu_syscall_table = (sys_call_ptr_t *)ksu_resolve_symbol_for_functable_hook("sys_call_table");
-    ksu_blog("  hook: sub-step sys_call_table=%lx\n", (unsigned long)ksu_syscall_table);
     pr_info("sys_call_table=0x%lx\n", (unsigned long)ksu_syscall_table);
 
     if (!ksu_syscall_table) {
-        ksu_blog("  hook: sys_call_table NULL -> return\n");
         return;
     }
 
 #ifdef CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER
-    ksu_blog("  hook: sub-step prepare_abs_jump BEGIN\n");
     if (prepare_abs_jump("x64_sys_call", &x64_sys_call_patch_addr, x64_sys_call_patch_orig_insn) == 0) {
         /* [KSU-X86-PORT] 先建蹦床，再打补丁；否则别的 CPU 可能在本页就绪前跳进来。
          * 分配用 vmalloc + set_memory_x（H3C MegaBook 14 没有 module_alloc 符号，见踩坑记录 1.5）*/
         unsigned char *t = (unsigned char *)vmalloc(PAGE_SIZE);
         if (!t) {
-            ksu_blog("  hook: trampoline vmalloc FAILED -> skip absjump\n");
             x64_sys_call_patch_addr = NULL;
         } else {
             unsigned char *p = t;
@@ -582,18 +542,14 @@ void  __nocfi ksu_syscall_hook_init(void)
             *p++ = 0xc3;                                          /* ret */
 
             if (set_memory_x((unsigned long)t, 1) != 0) {
-                ksu_blog("  hook: set_memory_x FAILED -> skip absjump\n");
                 vfree(t);
                 x64_sys_call_patch_addr = NULL;
             } else {
                 ksu_tramp = t;
-                ksu_blog("  hook: trampoline built @%lx cont=%lx len=%u\n",
-                         (unsigned long)t, cont, (unsigned int)(p - t));
                 if (install_abs_jump(x64_sys_call_patch_addr, my_x64_sys_call) == 0) {
-                    ksu_blog("  hook: sub-step patch_abs_jump DONE addr=%lx\n",
+                    ksu_blog("KSU: x64_sys_call patch installed at %lx\n",
                              (unsigned long)x64_sys_call_patch_addr);
                 } else {
-                    ksu_blog("  hook: patch_abs_jump FAILED\n");
                     ksu_tramp = NULL;
                     vfree(t);
                     x64_sys_call_patch_addr = NULL;
@@ -601,7 +557,6 @@ void  __nocfi ksu_syscall_hook_init(void)
             }
         }
     } else {
-        ksu_blog("  hook: prepare_abs_jump FAILED -> absjump skipped\n");
     }
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
     syscall_enter_from_user_mode_fn = find_kernel_symbol_exact("syscall_enter_from_user_mode");
@@ -615,13 +570,11 @@ void  __nocfi ksu_syscall_hook_init(void)
 #endif
 
     // Find one ni_syscall slot for the dispatcher
-    ksu_blog("  hook: sub-step find_ni_syscall_slots BEGIN\n");
     if (ksu_find_ni_syscall_slots(&ni_slot, 1) < 1) {
         pr_err("failed to find ni_syscall slot for dispatcher\n");
         return;
     }
 
-    ksu_blog("  hook: sub-step ni_slot=%d\n", ni_slot);
     ksu_dispatcher_nr = ni_slot;
     /* [KSU-X86-PORT] 上游原逻辑：把 dispatcher 挂到 ni_syscall 表项上。
      *
@@ -638,9 +591,7 @@ void  __nocfi ksu_syscall_hook_init(void)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0)
     ksu_syscall_table_hook(ksu_dispatcher_nr, (sys_call_ptr_t)ksu_syscall_dispatcher, NULL);
 #else
-    ksu_blog("  hook: table_hook skipped (6.9+ uses x64_sys_call switch)\n");
 #endif
-    ksu_blog("  hook: dispatcher installed at slot %d\n", ni_slot);
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
 }
 

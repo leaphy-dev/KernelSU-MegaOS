@@ -884,8 +884,6 @@ long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void 
         static int n_in;
         if (n_in < 40) {
             n_in++;
-            extern void ksu_blog(const char *fmt, ...);
-            ksu_blog("SUPER: ioctl cmd=0x%x uid=%d\n", cmd, current_uid().val);
         }
     }
 
@@ -904,8 +902,6 @@ long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void 
                 static int n_out;
                 if (n_out < 40) {
                     n_out++;
-                    extern void ksu_blog(const char *fmt, ...);
-                    ksu_blog("SUPER: ioctl 0x%x -> %ld\n", cmd, ret);
                 }
             }
             return ret;
@@ -938,3 +934,4 @@ void ksu_supercall_cleanup_state(void)
     }
     up_write(&mount_list_lock);
 }
+

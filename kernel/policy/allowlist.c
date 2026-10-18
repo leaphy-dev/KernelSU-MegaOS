@@ -1,5 +1,4 @@
 #include <linux/rcupdate.h>
-extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */
 #include <linux/limits.h>
 #include <linux/rculist.h>
 #include <linux/mutex.h>
@@ -420,20 +419,14 @@ bool ksu_get_allow_list(int *array, u16 length, u16 *out_length, u16 *out_total,
 // TODO: move to kernel thread or work queue
 static void do_persistent_allow_list(struct callback_head *_cb)
 {
-    ksu_blog("     write: enter (task_work ran)\n");
     u32 magic = FILE_MAGIC;
     u32 version = FILE_FORMAT_VERSION;
     struct perm_data *p = NULL;
     loff_t off = 0;
     int i;
 
-    ksu_blog("     write: override_creds begin\n");
     const struct cred *saved = override_creds(ksu_cred);
-    ksu_blog("     write: override_creds done\n");
-    ksu_blog("     write: filp_open begin %s\n", KERNEL_SU_ALLOWLIST);
     struct file *fp = filp_open(KERNEL_SU_ALLOWLIST, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    ksu_blog("     write: filp_open done\n");
-    ksu_blog("     write: fp err=%d\n", (int)IS_ERR(fp));
     if (IS_ERR(fp)) {
         pr_err("save_allow_list create file failed: %ld\n", PTR_ERR(fp));
         goto out;
@@ -460,22 +453,17 @@ static void do_persistent_allow_list(struct callback_head *_cb)
     mutex_unlock(&allowlist_mutex);
 
 close_file:
-    ksu_blog("     write: closing\n");
     filp_close(fp, 0);
 out:
-    ksu_blog("     write: revert_creds begin\n");
     revert_creds(saved);
-    ksu_blog("     write: revert_creds done\n");
     kfree(_cb);
 }
 
 void ksu_persistent_allow_list()
 {
-    ksu_blog("    persist: enter\n");
     struct task_struct *tsk;
 
     rcu_read_lock();
-    ksu_blog("    persist: find init task\n");
     tsk = get_pid_task(find_vpid(1), PIDTYPE_PID);
     if (!tsk) {
         rcu_read_unlock();
@@ -489,7 +477,6 @@ void ksu_persistent_allow_list()
         pr_err("save_allow_list alloc cb err\b");
         goto put_task;
     }
-    ksu_blog("    persist: task_work_add begin\n");
     cb->func = do_persistent_allow_list;
     if (task_work_add(tsk, cb, TWA_RESUME)) {
         kfree(cb);
@@ -497,7 +484,6 @@ void ksu_persistent_allow_list()
     }
 
 put_task:
-    ksu_blog("    persist: done\n");
     put_task_struct(tsk);
 }
 
@@ -528,7 +514,6 @@ static void migrate_profile(u32 version, struct app_profile *profile)
 
 void ksu_load_allow_list()
 {
-    { static int k; if (k < 4) { k++; ksu_blog("  allowlist: load_allow_list\n"); } }
 #ifdef CONFIG_KSU_DISABLE_POLICY
     pr_info("allowlist load skipped because policy is disabled\n");
     return;
@@ -599,7 +584,6 @@ exit:
 
 void ksu_prune_allowlist(bool (*is_uid_valid)(uid_t, char *, void *), void *data)
 {
-    { static int k; if (k < 4) { k++; ksu_blog("  allowlist: prune_allowlist\n"); } }
     struct perm_data *np = NULL;
     struct hlist_node *tmp;
     int i;
@@ -610,40 +594,31 @@ void ksu_prune_allowlist(bool (*is_uid_valid)(uid_t, char *, void *), void *data
     }
 
     bool modified = false;
-    ksu_blog("   prune: loop start (count=%d)\n", allow_list_count);
     mutex_lock(&allowlist_mutex);
     hash_for_each_safe (allow_list, i, tmp, np, list) {
         uid_t uid = np->profile.curr_uid;
         char *package = np->profile.key;
-        ksu_blog("   p3: iter uid=%d key=%.16s\n", (int)uid, package ? package : "(null)");
         // we use this uid for special cases, don't prune it!
         bool is_preserved_uid = uid == KSU_APP_PROFILE_PRESERVE_UID || uid == WEBVIEW_ZYGOTE_UID;
-        ksu_blog("   p3: calling is_uid_valid\n");
         bool valid_ret = is_uid_valid(uid, package, data);
-        ksu_blog("   p3: is_uid_valid=%d\n", (int)valid_ret);
         if (!is_preserved_uid && !valid_ret) {
             modified = true;
             pr_info("prune uid: %d, package: %s\n", uid, package);
-            ksu_blog("   prune: deleting uid=%d\n", (int)uid);
             hlist_del_rcu(&np->list);
             put_perm_data(np);
             --allow_list_count;
         }
     }
     mutex_unlock(&allowlist_mutex);
-    ksu_blog("   prune: loop done, modified=%d\n", (int)modified);
 
     if (modified) {
         smp_mb();
-        ksu_blog("   prune: calling ksu_persistent_allow_list\n");
         ksu_persistent_allow_list();
-        ksu_blog("   prune: ksu_persistent_allow_list returned\n");
     }
 }
 
 void  ksu_allowlist_init(void)
 {
-    { static int k; if (k < 4) { k++; ksu_blog("  allowlist: init\n"); } }
     init_default_profiles();
 }
 
