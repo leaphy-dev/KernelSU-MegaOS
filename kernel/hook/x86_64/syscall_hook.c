@@ -9,6 +9,9 @@
 #include <linux/mutex.h>
 #include <linux/nospec.h>
 #include <linux/uaccess.h>
+#include <linux/fs.h>
+#include <linux/mutex.h>
+#include <linux/kmsg_dump.h>
 #include <asm/cacheflush.h>
 #include "infra/symbol_resolver.h"
 #include "../patch_memory.h"
@@ -293,8 +296,73 @@ static void ksu_sysno_flush_now(void)
 		ksu_sysno_flush(NULL);
 }
 
+#ifdef KSU_X86_BLACKBOX
+/* [KSU-X86-PORT][DIAG] 系统调用心跳（代替"每次 syscall 写盘"的黑匣子）：
+ *  - 每个 syscall 只做几次内存写（无 I/O，开销可忽略）
+ *  - 每 500ms 把 "总次数 + 最近 16 个 nr" 落盘一次
+ * 用途：① 用 HB 的 n 是否增长，证明补丁到底有没有在执行；
+ *       ② 崩溃后能看到临死前最后若干 syscall。
+ * 注意：上一版在第一次 syscall 时 filp_open 失败就永久关闭了黑匣子
+ *       （那时 /dev 还没建好）⇒ 一个字节都没写，看起来像"补丁没执行"。
+ * 诊断完成后应移除。 */
+static u32 ksu_hb_ring[16];
+static u32 ksu_hb_idx;
+static unsigned long ksu_hb_count;
+static struct delayed_work ksu_hb_work;
+
+/* [KSU-X86-PORT][DIAG] panic 时把内核日志（含 oops 回溯）写到
+ * persistent@768KB。文件在 init 阶段预先打开，panic 路径只做 kernel_write，
+ * 尽量避免在崩溃时做路径查找。 */
+static struct file *ksu_panic_f;
+static char *ksu_panic_buf;
+static struct kmsg_dumper ksu_kd;
+
+static void ksu_kd_dump(struct kmsg_dumper *d, struct kmsg_dump_detail *detail)
+{
+    struct kmsg_dump_iter iter;
+    size_t len = 0;
+
+    if (!ksu_panic_f || !ksu_panic_buf)
+        return;
+
+    /* 注意：必须用 get_buffer（取【尾部】），不能用 get_line 循环
+     * —— 后者从最旧记录开始，128KB 会被开机早期日志塞满，看不到 panic。*/
+    kmsg_dump_rewind(&iter);
+    if (!kmsg_dump_get_buffer(&iter, true, ksu_panic_buf, 65536, &len) || !len)
+        return;
+
+    ksu_panic_f->f_pos = 768 * 1024;
+    kernel_write(ksu_panic_f, ksu_panic_buf, len, &ksu_panic_f->f_pos);
+}
+
+static void ksu_hb_flush(struct work_struct *w)
+{
+    static unsigned long last;
+    char b[192];
+    int n = 0, i;
+    u32 start;
+
+    if (ksu_hb_count != last) {
+        last = ksu_hb_count;
+        n += snprintf(b + n, sizeof(b) - n, "HB n=%lu last=", ksu_hb_count);
+        start = (ksu_hb_idx >= 16) ? (ksu_hb_idx - 16) : 0;
+        for (i = 0; i < 16 && n < (int)sizeof(b) - 12; i++)
+            n += snprintf(b + n, sizeof(b) - n, "%u ", ksu_hb_ring[(start + i) & 15]);
+        n += snprintf(b + n, sizeof(b) - n, "\n");
+        if (n > 0)
+            ksu_blog("%s", b);
+    }
+    schedule_delayed_work(&ksu_hb_work, msecs_to_jiffies(500));
+}
+#endif
+
 static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
 {
+#ifdef KSU_X86_BLACKBOX
+    ksu_hb_ring[ksu_hb_idx & 15] = nr;
+    ksu_hb_idx++;
+    ksu_hb_count++;
+#endif
     /* KSU 只关心被 tracepoint 改写成 dispatcher 槽位的调用；其余交回内核 */
     if ((int)nr == ksu_dispatcher_nr) {
         ksu_sysno_ring[ksu_sysno_idx % KSU_SYSNO_RING] = nr;
@@ -492,6 +560,24 @@ void  __nocfi ksu_syscall_hook_init(void)
     ksu_blog("DIAG xx64_sys_call=%lx\n", kallsyms_lookup_name("x64_sys_call"));
     ksu_diag_dump("x64_sys_call", kallsyms_lookup_name("x64_sys_call"));
     ksu_blog("DIAG init_mm(shim)=%lx\n", find_kernel_symbol_exact("init_mm"));
+#endif
+
+#ifdef KSU_X86_BLACKBOX
+    INIT_DELAYED_WORK(&ksu_hb_work, ksu_hb_flush);
+    schedule_delayed_work(&ksu_hb_work, msecs_to_jiffies(500));
+    ksu_blog("HB: started (dispatcher_nr=%d)\n", ksu_dispatcher_nr);
+
+    ksu_panic_buf = vmalloc(65536);
+    ksu_panic_f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
+    if (IS_ERR(ksu_panic_f)) {
+        ksu_panic_f = NULL;
+        ksu_blog("KD: open persistent FAILED\n");
+    } else {
+        ksu_kd.dump = ksu_kd_dump;
+        ksu_kd.max_reason = KMSG_DUMP_MAX;   /* 记录 panic/oops 等所有原因 */
+        ksu_blog("KD: register=%d (panic log -> persistent@768KB)\n",
+                 kmsg_dump_register(&ksu_kd));
+    }
 #endif
 
     memset(syscall_hooks, 0, sizeof(syscall_hooks));

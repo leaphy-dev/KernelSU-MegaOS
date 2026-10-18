@@ -878,9 +878,20 @@ long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void 
 #ifdef CONFIG_KSU_DEBUG
     pr_info("ksu ioctl: cmd=0x%x from uid=%d\n", cmd, current_uid().val);
 #endif
+    /* [KSU-X86-PORT][DIAG] 记录管理器实际调用的 ioctl 与返回值，
+     * 用于定位"内核已运行但管理器显示未安装"（GET_INFO 失败）。*/
+    {
+        static int n_in;
+        if (n_in < 40) {
+            n_in++;
+            extern void ksu_blog(const char *fmt, ...);
+            ksu_blog("SUPER: ioctl cmd=0x%x uid=%d\n", cmd, current_uid().val);
+        }
+    }
 
     for (i = 0; ksu_ioctl_handlers[i].handler; i++) {
         if (cmd == ksu_ioctl_handlers[i].cmd) {
+            long ret;
             // Check permission first
             if (ksu_ioctl_handlers[i].perm_check && !ksu_ioctl_handlers[i].perm_check() &&
                 !(ksu_ioctl_handlers[i].allow_su_session && ksu_is_su_session_fd(filp))) {
@@ -888,7 +899,16 @@ long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void 
                 return -EPERM;
             }
             // Execute handler
-            return ksu_ioctl_handlers[i].handler(argp);
+            ret = ksu_ioctl_handlers[i].handler(argp);
+            {
+                static int n_out;
+                if (n_out < 40) {
+                    n_out++;
+                    extern void ksu_blog(const char *fmt, ...);
+                    ksu_blog("SUPER: ioctl 0x%x -> %ld\n", cmd, ret);
+                }
+            }
+            return ret;
         }
     }
 

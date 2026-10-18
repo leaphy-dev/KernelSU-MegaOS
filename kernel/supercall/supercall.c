@@ -78,6 +78,11 @@ static int ksu_install_fd_with_permissions(unsigned int fd_flags, unsigned long 
 
     fd_install(fd, filp);
     pr_info("ksu fd installed: %d for pid %d\n", fd, current->pid);
+    /* [KSU-X86-PORT][DIAG] 记录 fd 安装（判断管理器进程何时拿到驱动 fd）*/
+    {
+        extern void ksu_blog(const char *fmt, ...);
+        ksu_blog("SUPER: fd installed=%d pid=%d perm=%lx\n", fd, current->pid, permissions);
+    }
     return fd;
 }
 

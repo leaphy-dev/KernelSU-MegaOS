@@ -28,6 +28,7 @@
 #include <linux/seccomp.h>
 #include <linux/uaccess.h>
 #include <linux/fs_struct.h>
+#include "../hook/patch_memory.h"   /* [KSU-X86-PORT] ksu_patch_text（IBT ENDBR 修复用） */
 #include <linux/proc_ns.h>
 #include <linux/lsm_hooks.h>
 #include <linux/mm_types.h>
@@ -95,6 +96,30 @@ typedef int (*ksu_klso_t)(unsigned long, unsigned long *, unsigned long *);
  *    所以这些【函数】都能被解析到；数据对象走 ③。
  * ================================================================== */
 
+/* [KSU-X86-PORT] IBT（CET）兼容：内核启动时的 endbr64 封存会把
+ * "只被直接调用"的函数开头的 endbr64 替换成 4 字节 NOP（实测 66 0f 1f 00）。
+ * shim 是【通过函数指针间接调用】真实函数的，必须先把 endbr64 补回去，
+ * 否则会触发 #CP → kernel BUG at arch/x86/kernel/cet.c:132。
+ * 实测 panic 现场：alloc_uid+0x0 ← escape_with_root_profile ← do_grant_root。
+ * 把 NOP 换成 endbr64 语义不变（两者都是 4 字节空操作），只影响 IBT 判定。 */
+static void ksu_ibt_ensure_endbr(void *addr)
+{
+	static u8 endbr[4] = { 0xf3, 0x0f, 0x1e, 0xfa };
+	static const u8 sealed[4] = { 0x66, 0x0f, 0x1f, 0x00 };
+	int ret;
+
+	if (!addr)
+		return;
+	if (memcmp(addr, endbr, 4) == 0)
+		return;
+	if (memcmp(addr, sealed, 4) != 0) {
+		pr_warn_once("ksu-shim: %px 开头不是已知 ENDBR 形态，跳过修复\n", addr);
+		return;
+	}
+	ret = ksu_patch_text(addr, endbr, 4, KSU_PATCH_TEXT_FLUSH_ICACHE);
+	pr_info("ksu-shim: ENDBR restored at %px (ret=%d)\n", addr, ret);
+}
+
 #define SHIM_FN(ret, name, proto, call, notfound)                            \
 	ret name proto                                                       \
 	{                                                                    \
@@ -106,6 +131,7 @@ typedef int (*ksu_klso_t)(unsigned long, unsigned long *, unsigned long *);
 				pr_warn_once("ksu-shim: 未能解析 %s\n", #name);\
 				return notfound;                             \
 			}                                                    \
+			ksu_ibt_ensure_endbr((void *)fn);                    \
 		}                                                            \
 		return fn call;                                              \
 	}
@@ -121,6 +147,7 @@ typedef int (*ksu_klso_t)(unsigned long, unsigned long *, unsigned long *);
 				pr_warn_once("ksu-shim: 未能解析 %s\n", #name);\
 				return;              \
 			}                            \
+			ksu_ibt_ensure_endbr((void *)fn);\
 		}                                    \
 		fn call;                             \
 	}
