@@ -551,10 +551,12 @@ void  __nocfi ksu_syscall_hook_init(void)
 
     ksu_blog("  hook: sub-step ni_slot=%d\n", ni_slot);
     ksu_dispatcher_nr = ni_slot;
-    /* [KSU-X86-PORT] 6.9+ 的 x64_sys_call 是生成的 switch，不查 sys_call_table；
-     * 12 字节 abs jump 已覆盖入口，ni_slot 只作为 dispatcher_nr 使用，不再 patch 表项。
-     * （表项 patch 在 <5.16 的 do_syscall_64 路径上才需要。） */
-    ksu_blog("  hook: table_hook not needed (abs jump covers x64_sys_call)\n");
+    /* [KSU-X86-PORT] 上游原逻辑：把 dispatcher 挂到 ni_syscall 表项上。
+     * 6.9+ 的 x64_sys_call 是生成的 switch、不查 sys_call_table，实际生效的是
+     * 上面的 12 字节 abs jump；这里保留上游调用（行为与上游一致，便于回退），
+     * 不删除。 */
+    ksu_syscall_table_hook(ksu_dispatcher_nr, (sys_call_ptr_t)ksu_syscall_dispatcher, NULL);
+    ksu_blog("  hook: dispatcher installed at slot %d\n", ni_slot);
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
 }
 
