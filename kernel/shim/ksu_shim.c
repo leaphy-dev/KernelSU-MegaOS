@@ -102,7 +102,7 @@ typedef int (*ksu_klso_t)(unsigned long, unsigned long *, unsigned long *);
  * 否则会触发 #CP → kernel BUG at arch/x86/kernel/cet.c:132。
  * 实测 panic 现场：alloc_uid+0x0 ← escape_with_root_profile ← do_grant_root。
  * 把 NOP 换成 endbr64 语义不变（两者都是 4 字节空操作），只影响 IBT 判定。 */
-static void ksu_ibt_ensure_endbr(void *addr)
+void ksu_ibt_ensure_endbr(void *addr)
 {
 	static u8 endbr[4] = { 0xf3, 0x0f, 0x1e, 0xfa };
 	static const u8 sealed[4] = { 0x66, 0x0f, 0x1f, 0x00 };
