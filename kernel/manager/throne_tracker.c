@@ -10,6 +10,8 @@ extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/version.h>
+#include <linux/sched/signal.h>
+#include <linux/rcupdate.h>
 
 #include "policy/allowlist.h"
 #include "manager/apk_sign.h"
