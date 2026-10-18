@@ -150,8 +150,10 @@ void  ksu_syscall_hook_manager_init(void)
 #endif
     if (ret) {
         pr_err("hook_manager: failed to register sys_enter tracepoint: %d\n", ret);
+        ksu_blog("hook_manager: sys_enter tracepoint FAILED ret=%d\n", ret);
     } else {
         pr_info("hook_manager: sys_enter tracepoint registered\n");
+        ksu_blog("hook_manager: sys_enter tracepoint registered\n");
     }
 #endif
 
