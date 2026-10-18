@@ -552,18 +552,21 @@ void  __nocfi ksu_syscall_hook_init(void)
     ksu_blog("  hook: sub-step ni_slot=%d\n", ni_slot);
     ksu_dispatcher_nr = ni_slot;
     /* [KSU-X86-PORT] 上游原逻辑：把 dispatcher 挂到 ni_syscall 表项上。
-     * 但 H3C MegaBook 14 上这条路径【必崩】，实测（hmenable6，2026-10-18）：
-     *   set_memory_rw(sys_call_table 所在 .rodata 页) 返回 0，
-     *   页面实际仍为只读 ⇒ memcpy 触发
-     *   #PF error_code(0x0003) supervisor write, CR2=sys_call_table+134*8
-     *   ⇒ Oops ⇒ Kernel panic。
-     * 而 6.9+ 的 x64_sys_call 是生成的 switch、不查 sys_call_table，
-     * 该表项 patch 本就不生效；真正的派发由上面的 12 字节 abs jump 完成。
-     * 故源码保留上游调用，仅在本设备构建时用 KSU_X86_SKIP_TABLE_HOOK 编译掉。 */
-#ifndef KSU_X86_SKIP_TABLE_HOOK
+     *
+     * 6.9 起（commit 1e3ad78334a6 "x86/syscall: Don't force use of indirect
+     * calls for system calls"）64 位派发改走 x64_sys_call 的 switch，
+     * 不再查 sys_call_table ⇒ 表项 patch 无效，真正生效的是上面的 abs jump。
+     *
+     * 而且 H3C MegaBook 14 的 sys_call_table 位于 .rodata：
+     * set_memory_rw() 返回 0 但页面仍只读，memcpy 会触发
+     *   #PF error_code(0x0003), CR2=sys_call_table+134*8
+     *   ⇒ Oops ⇒ Kernel panic（实测 hmenable6，2026-10-18）。
+     *
+     * 所以 >= 6.9 直接跳过；< 6.9 仍保留上游表项 patch。 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0)
     ksu_syscall_table_hook(ksu_dispatcher_nr, (sys_call_ptr_t)ksu_syscall_dispatcher, NULL);
 #else
-    ksu_blog("  hook: table_hook skipped (rodata RO; abs jump covers x64_sys_call)\n");
+    ksu_blog("  hook: table_hook skipped (6.9+ uses x64_sys_call switch)\n");
 #endif
     ksu_blog("  hook: dispatcher installed at slot %d\n", ni_slot);
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
