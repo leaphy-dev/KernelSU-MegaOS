@@ -462,6 +462,7 @@ void  __nocfi ksu_syscall_hook_init(void)
 {
     int ni_slot;
 
+// 准备kernel日志存储
 #ifdef KSU_X86_BLACKBOX
     ksu_panic_buf = vmalloc(65536);
     ksu_panic_f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
