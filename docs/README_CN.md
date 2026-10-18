@@ -51,11 +51,28 @@ WSA, ChromeOS 和运行在容器上的 Android 也可以与 KernelSU 一起工�
 
 ### MegaOS（H3C MegaBook 14）
 
-本分支通过刷入预打包的 `boot_a` 镜像安装，**不需要重新编译内核，也不需要 fastboot**。
+本分支通过从 Windows 刷入预打包的 `boot_a` 镜像安装，不需要重新编译内核，也不需要 fastboot。
+This branch is installed by flashing a pre-patched `boot_a` image from Windows.
 
-1. 从 Release 下载 `boot_a_megaos-6.12.30-r1.img` 和 `SHA256SUMS`。
-2. 在镜像所在目录打开 **管理员** PowerShell。
-3. 运行安装脚本（自动校验 hash、备份当前 `boot_a`、写入并回读校验）：
+**先决条件 / Prerequisites**
+
+- **请先切换到 Windows 系统。** 安装脚本直接写 `\\.\PhysicalDrive0`，无法在 Android / Linux / WSL 中运行。
+  **Boot into Windows first.** The installer writes directly to `\\.\PhysicalDrive0`; it cannot run from Android, Linux, or WSL.
+- Windows 11 + **管理员** PowerShell。
+  Windows 11 with an **Administrator** PowerShell.
+- 从 Release 下载 `boot_a_megaos-6.12.30-r1.img`、`install-megaos.ps1`、`SHA256SUMS`。
+  Download the three files from the release page.
+- 保留原厂 `boot_a` 备份（安装脚本的 `-Backup` 会自动备份）。
+  Keep a stock `boot_a` backup (the installer's `-Backup` does this automatically).
+
+**安装 / Install**
+
+1. 先启动到 Windows。
+   Boot into Windows.
+2. 将三个文件放在同一目录，并在该目录打开管理员 PowerShell。
+   Put the three files in one folder and open an Administrator PowerShell there.
+3. 运行安装脚本（校验 hash、备份 `boot_a`、写入并回读校验）：
+   Run the installer (it checks the hash, backs up `boot_a`, writes, and verifies by reading back):
 
    ```powershell
    .\install-megaos.ps1 `
@@ -65,17 +82,21 @@ WSA, ChromeOS 和运行在容器上的 Android 也可以与 KernelSU 一起工�
    ```
 
    源码树里同一脚本位于 `scripts/install-megaos.ps1`。
+   In the source tree the same script is at `scripts/install-megaos.ps1`.
 
 4. 安装官方 KernelSU 管理器 APK（`me.weishu.kernelsu`）。
-5. 重启，管理器应显示“已安装”。
+   Install the official KernelSU manager APK (`me.weishu.kernelsu`).
+5. 重启进入 MegaOS，管理器应显示“已安装”。
+   Reboot into MegaOS; the manager should show **Installed**.
 
-回滚：
+**回滚 / Rollback**
 
 ```powershell
 .\install-megaos.ps1 -Restore .\boot_a-backup-YYYYmmdd-HHMMSS.img
 ```
 
-> 仅适用于 H3C MegaBook 14 / 内核 `6.12.30` / `boot_a`；刷写前请保留原厂备份。
+> 仅适用于 H3C MegaBook 14 / 内核 `6.12.30` / `boot_a`。
+> For H3C MegaBook 14 / kernel `6.12.30` / `boot_a` only.
 
 ## 参与翻译
 

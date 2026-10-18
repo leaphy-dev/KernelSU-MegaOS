@@ -51,13 +51,29 @@ Currently, the `arm64-v8a` and `x86_64` architectures are supported.
 
 ### MegaOS (H3C MegaBook 14)
 
-This branch is installed by flashing a pre-patched `boot_a` image.
+This branch is installed by flashing a pre-patched `boot_a` image from Windows.
 No kernel rebuild and no fastboot are required.
+本分支通过从 Windows 刷入预打包的 `boot_a` 镜像安装，不需要重新编译内核，也不需要 fastboot。
 
-1. Download `boot_a_megaos-6.12.30-r1.img` and `SHA256SUMS` from the release page.
-2. Open an **Administrator** PowerShell in the directory containing the image.
-3. Run the installer (it checks the image hash, backs up the current `boot_a`,
-   writes the image, and verifies it by reading back):
+**Prerequisites / 先决条件**
+
+- **Boot into Windows first.** The installer writes directly to `\\.\PhysicalDrive0`; it cannot run from Android, Linux, or WSL.
+  **请先切换到 Windows 系统。** 安装脚本直接写 `\\.\PhysicalDrive0`，无法在 Android / Linux / WSL 中运行。
+- Windows 11 with an **Administrator** PowerShell.
+  Windows 11 + **管理员** PowerShell。
+- Download `boot_a_megaos-6.12.30-r1.img`, `install-megaos.ps1`, and `SHA256SUMS` from the release page.
+  从 Release 下载 `boot_a_megaos-6.12.30-r1.img`、`install-megaos.ps1`、`SHA256SUMS`。
+- Keep a stock `boot_a` backup (the installer's `-Backup` does this automatically).
+  保留原厂 `boot_a` 备份（安装脚本的 `-Backup` 会自动备份）。
+
+**Install / 安装**
+
+1. Boot into Windows.
+   先启动到 Windows。
+2. Put the three files in one folder and open an Administrator PowerShell there.
+   将三个文件放在同一目录，并在该目录打开管理员 PowerShell。
+3. Run the installer (it checks the hash, backs up `boot_a`, writes, and verifies by reading back):
+   运行安装脚本（校验 hash、备份 `boot_a`、写入并回读校验）：
 
    ```powershell
    .\install-megaos.ps1 `
@@ -67,17 +83,21 @@ No kernel rebuild and no fastboot are required.
    ```
 
    In the source tree the same script is at `scripts/install-megaos.ps1`.
+   源码树里同一脚本位于 `scripts/install-megaos.ps1`。
 
 4. Install the official KernelSU manager APK (`me.weishu.kernelsu`).
-5. Reboot. The manager should show **Installed**.
+   安装官方 KernelSU 管理器 APK（`me.weishu.kernelsu`）。
+5. Reboot into MegaOS; the manager should show **Installed**.
+   重启进入 MegaOS，管理器应显示“已安装”。
 
-Rollback:
+**Rollback / 回滚**
 
 ```powershell
 .\install-megaos.ps1 -Restore .\boot_a-backup-YYYYmmdd-HHMMSS.img
 ```
 
-> For H3C MegaBook 14 / kernel `6.12.30` / `boot_a` only. Keep a stock backup before flashing.
+> For H3C MegaBook 14 / kernel `6.12.30` / `boot_a` only.
+> 仅适用于 H3C MegaBook 14 / 内核 `6.12.30` / `boot_a`。
 
 ## Translation
 
