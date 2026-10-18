@@ -1,8 +1,21 @@
 
-/* ================= KSU_X86_BOOT_LOG =================
- * 双通道落盘日志：/data/local/tmp/ksu-boot.log + persistent@512KB
- * 全部 O_SYNC，保证崩溃/重启也不丢；日志最后一行 = 崩溃点。
- * ================================================== */
+/* ============================================================================
+ * [KSU-X86-PORT] 以下日志系统【不是 KernelSU 上游代码】，是为本机调试新增的。
+ *
+ * 与上游的差异：
+ *   - 上游只用 pr_info/pr_err 打到内核日志，必须接 adb/dmesg 才能看；
+ *   - 本实现新增 ksu_blog()：把日志直接顺序写到 persistent 分区（O_SYNC），
+ *     没有 adb 也能在 Windows 侧裸读，崩溃/重启都不丢；
+ *   - 每行加 [秒.毫秒] 时间戳（上游没有），用于对齐崩溃前最后一条日志；
+ *   - 【只保留 persistent 一个通道】：
+ *       /sdcard/ksu-boot.log          从内核写不稳定，已移除；
+ *       /data/local/tmp/ksu-boot.log  依赖 adb，已移除；
+ *     因此不再有"通道探测/状态行"逻辑，第一条日志直接从 512KB 开始写。
+ *
+ * 注意：ksu_blog() 内部会 filp_open/kernel_write（可睡眠），
+ *       严禁在原子上下文（tracepoint / kprobe / spinlock / irq）中调用，
+ *       那种场景只能用 pr_info()。
+ * ========================================================================== */
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/uaccess.h>
@@ -10,16 +23,10 @@
 #include <linux/slab.h>
 #include <linux/timekeeping.h>
 
-static loff_t ksu_blog_persist_pos = 512 * 1024;
-
-static bool ksu_blog_first = true;
-static char ksu_blog_status[160];
-
-
+/* persistent 分区（1MB）：日志从 512KB 起顺序追加；
+ * 静态变量每次开机归零 ⇒ 每次开机从头重写。 */
 static loff_t ksu_blog_persist_off;
 
-/* persistent：从 512KB 起【顺序追加】；每次开机 statics 归零 ⇒ 每次开机从头重写 ✓
- * 直接读裸设备 + O_SYNC ⇒ 崩溃/重启都不丢 ✓ */
 static void ksu_blog_to_persist(const char *buf, int n)
 {
 	struct file *f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
@@ -34,25 +41,6 @@ static void ksu_blog_to_persist(const char *buf, int n)
 	filp_close(f, NULL);
 }
 
-static void ksu_blog_to_file(const char *path, const char *buf, int n, const char *tag)
-{
-	struct file *f = filp_open(path, O_WRONLY | O_CREAT | O_APPEND | O_SYNC, 0644);
-
-	if (IS_ERR(f)) {
-		if (ksu_blog_first) {
-			strlcat(ksu_blog_status, tag, sizeof(ksu_blog_status));
-			strlcat(ksu_blog_status, "=ERR ", sizeof(ksu_blog_status));
-		}
-		return;
-	}
-	kernel_write(f, buf, n, &f->f_pos);
-	filp_close(f, NULL);
-	if (ksu_blog_first) {
-		strlcat(ksu_blog_status, tag, sizeof(ksu_blog_status));
-		strlcat(ksu_blog_status, "=ok ", sizeof(ksu_blog_status));
-	}
-}
-
 void ksu_blog(const char *fmt, ...)
 {
 	char buf[320];
@@ -60,8 +48,7 @@ void ksu_blog(const char *fmt, ...)
 	va_list ap;
 	int n, m;
 
-	/* [KSU-X86-PORT] 每行加开机时间戳（秒.毫秒，自 boot 起），
-	 * 便于判断"崩溃前最后一条日志"与前后事件的时间关系。 */
+	/* [KSU-X86-PORT] 时间戳前缀（上游没有） */
 	ktime_get_boottime_ts64(&ts);
 	n = snprintf(buf, sizeof(buf), "[%5lld.%03ld] ", (long long)ts.tv_sec,
 		     ts.tv_nsec / 1000000);
@@ -75,32 +62,6 @@ void ksu_blog(const char *fmt, ...)
 	n += m;
 	if (n > (int)sizeof(buf) - 1)
 		n = sizeof(buf) - 1;
-
-	ksu_blog_to_file("/sdcard/ksu-boot.log", buf, n, "sdcard");
-	ksu_blog_to_file("/data/local/tmp/ksu-boot.log", buf, n, "data");
-
-	/* [KSU-X86-PORT] 首行状态先落盘，再写本条消息。
-	 * 旧实现顺序相反：状态行写在 512KB 处会覆盖掉第一条日志的前半截
-	 * （之前日志首行变成 "[ksu-blog channels] sdcard=oSTEP: 1" 就是这个原因）。*/
-	if (ksu_blog_first) {
-		char st[200];
-		int k;
-		struct file *f;
-
-		ksu_blog_first = false;
-		k = snprintf(st, sizeof(st), "[ksu-blog channels] %s\n", ksu_blog_status);
-		if (k > 0) {
-			ksu_blog_to_file("/sdcard/ksu-boot.log", st, k, "x");
-			ksu_blog_to_file("/data/local/tmp/ksu-boot.log", st, k, "x");
-			f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
-			if (!IS_ERR(f)) {
-				f->f_pos = 512 * 1024;
-				kernel_write(f, st, k, &f->f_pos);
-				ksu_blog_persist_off = 512 * 1024 + k;
-				filp_close(f, NULL);
-			}
-		}
-	}
 
 	ksu_blog_to_persist(buf, n);
 }
