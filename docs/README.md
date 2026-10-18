@@ -3,11 +3,18 @@
 # KernelSU
 
 > [!NOTE]
-> **MegaOS port branch:** this branch is an unofficial x86_64 LKM adaptation for the
-> **H3C MegaBook 14** running **MegaOS (Android 14, kernel 6.12.30)**. The stock vendor
-> kernel is left untouched. It is not affiliated with the KernelSU upstream project.
-> Release `megaos-6.12.30-r1`; module `lkm-x86_64-megaos-android14-6.12_kernelsu.ko`;
-> build entry `kernel/build-megaos-x64.sh`.
+> **MegaOS port branch / MegaOS 移植分支**
+>
+> This branch is an unofficial x86_64 LKM adaptation for the **H3C MegaBook 14**
+> running **MegaOS (Android 14, kernel 6.12.30)**. The stock vendor kernel is left
+> untouched. It is not affiliated with the KernelSU upstream project.
+>
+> 本分支是面向 **H3C MegaBook 14 / MegaOS（Android 14，内核 6.12.30）** 的非官方
+> x86_64 LKM 适配，**不修改厂商内核**，与 KernelSU 上游项目无隶属关系。
+>
+> Release / 版本 `megaos-6.12.30-r1` ·
+> module / 模块 `lkm-x86_64-megaos-android14-6.12_kernelsu.ko` ·
+> build / 构建 `kernel/build-megaos-x64.sh`
 
 <img src="https://kernelsu.org/logo.png" style="width: 96px;" alt="logo">
 
