@@ -654,8 +654,14 @@ void  ksu_ksud_init()
 {
     int ret;
 
+    /* [KSU-X86-PORT] 6.9+ 的 64 位派发走 x64_sys_call switch，不查 sys_call_table，
+     * 这两个表项 hook 本来就不会生效；而 H3C MegaBook 14 的 sys_call_table 位于
+     * .rodata：set_memory_rw() 返回 0 但页面仍只读 -> memcpy 触发 #PF panic
+     * （hmenable6 实测）。因此 >= 6.9 直接跳过，< 6.9 保留上游行为。 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0)
     ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
     ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
+#endif
 
     ret = register_kprobe(&input_event_kp);
     pr_info("ksud: input_event_kp: %d\n", ret);
