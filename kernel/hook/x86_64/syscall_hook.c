@@ -402,7 +402,7 @@ static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
     /* [KSU-X86-PORT] 其余调用：走原地蹦床（回放被覆盖的 12 字节后跳回
      * x64_sys_call+12），由内核自己的 switch 完成派发。
      * 上游/KSU-Next 在这里用 ksu_syscall_table[nr](regs) 自行派发；
-     * 本机实测该路径会在管理器启动时整机 panic（NR/表项与生成 switch 不完全一致），
+     * H3C MegaBook 14 实测该路径会在管理器启动时整机 panic（NR/表项与生成 switch 不完全一致），
      * 因此改为蹦床，完全不碰 sys_call_table。 */
     if (ksu_tramp)
         return ((long (*)(const struct pt_regs *, unsigned int))ksu_tramp)(regs, nr);
@@ -630,7 +630,7 @@ void  __nocfi ksu_syscall_hook_init(void)
     ksu_blog("  hook: sub-step prepare_abs_jump BEGIN\n");
     if (prepare_abs_jump("x64_sys_call", &x64_sys_call_patch_addr, x64_sys_call_patch_orig_insn) == 0) {
         /* [KSU-X86-PORT] 先建蹦床，再打补丁；否则别的 CPU 可能在本页就绪前跳进来。
-         * 分配用 vmalloc + set_memory_x（本机没有 module_alloc 符号，见踩坑记录 1.5）*/
+         * 分配用 vmalloc + set_memory_x（H3C MegaBook 14 没有 module_alloc 符号，见踩坑记录 1.5）*/
         unsigned char *t = (unsigned char *)vmalloc(PAGE_SIZE);
         if (!t) {
             ksu_blog("  hook: trampoline vmalloc FAILED -> skip absjump\n");

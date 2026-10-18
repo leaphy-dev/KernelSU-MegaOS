@@ -59,7 +59,7 @@ unsigned long __nocfi find_kernel_symbol_exact(const char *symbol_name)
     unsigned long addr = 0;
     extern unsigned long ksu_shim_exact_lookup(const char *name);
 
-    /* 本设备内核 KALLSYMS_ALL=n：数据符号不在 /proc/kallsyms 里，
+    /* H3C MegaBook 14 内核 KALLSYMS_ALL=n：数据符号不在 /proc/kallsyms 里，
      * 由 shim 用【设备链接期地址 + KASLR slide】精确提供（如 sys_call_table）。*/
     {
         unsigned long exact = ksu_shim_exact_lookup(symbol_name);

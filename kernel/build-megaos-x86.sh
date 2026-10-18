@@ -2,15 +2,15 @@
 # ============================================================================
 # build-megaos-x86.sh — H3C MegaBook / MegaOS (Android 14, kernel 6.12.30) LKM 构建
 #
-# 这是本设备的专用构建入口（对应上游 kernel/build-all-x64.sh 的位置），
+# 这是 H3C MegaBook 14 的专用构建入口（对应上游 kernel/build-all-x64.sh 的位置），
 # 与上游构建脚本的差异（每一条都对应一个实际踩过的坑）：
 #   1) 内核树用 ACK 树（KDIR，默认 ~/megabook/ack），不是 DDK 的 /opt/ddk
-#   2) 跳过上游的 check_symbol：本机 KALLSYMS_ALL=n 且 vmlinux 无 __crc_*，
+#   2) 跳过上游的 check_symbol：H3C MegaBook 14 KALLSYMS_ALL=n 且 vmlinux 无 __crc_*，
 #      符号校验必然失败；改用 shim + 运行期解析
 #   3) 每次构建前清除产物：系统时钟错乱会产生"未来时间戳"，
 #      导致 make 跳过 `LD [M] kernelsu.o`，产物静默不变
 #   4) 构建后把 __versions 段 sh_size 清零（保留段）：MODVERSIONS=y 会做
-#      CRC 比对，本机没有 __crc_* ⇒ 不清零则 insmod 直接失败
+#      CRC 比对，H3C MegaBook 14 没有 __crc_* ⇒ 不清零则 insmod 直接失败
 #
 # 用法：
 #   ./build-megaos-x86.sh                 # 默认（hook manager 启用，无诊断）
