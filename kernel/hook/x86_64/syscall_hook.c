@@ -8,6 +8,8 @@
 #include <asm/set_memory.h>
 #include <linux/mutex.h>
 #include <linux/nospec.h>
+#include <linux/workqueue.h>
+#include <linux/jiffies.h>
 #include <linux/uaccess.h>
 #include <linux/fs.h>
 #include <linux/mutex.h>
@@ -323,6 +325,52 @@ static void ksu_kd_dump(struct kmsg_dumper *d, struct kmsg_dump_detail *detail)
     kernel_write(ksu_panic_f, ksu_panic_buf, len, &ksu_panic_f->f_pos);
 }
 
+/* [KSU-X86-PORT] 早期 init 时 /dev 可能还没就绪；每秒重试打开 persistent，
+ * 最多 60 次。其余部分（hook/补丁）不依赖 /dev，已经在 module_init 完成。 */
+static struct delayed_work ksu_kd_retry_work;
+static int ksu_kd_retries_left = 60;
+
+static int ksu_panic_dumper_try(void)
+{
+    if (ksu_panic_f)
+        return 0;
+
+    if (!ksu_panic_buf) {
+        ksu_panic_buf = vmalloc(65536);
+        if (!ksu_panic_buf)
+            return -ENOMEM;
+    }
+
+    ksu_panic_f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
+    if (IS_ERR(ksu_panic_f)) {
+        ksu_panic_f = NULL;
+        return -ENODEV;
+    }
+
+    ksu_kd.dump = ksu_kd_dump;
+    ksu_kd.max_reason = KMSG_DUMP_MAX;
+    ksu_blog("KD: register=%d (panic log -> persistent@768KB)\n",
+             kmsg_dump_register(&ksu_kd));
+    return 0;
+}
+
+static void ksu_kd_retry_fn(struct work_struct *w)
+{
+    if (ksu_panic_dumper_try() == 0)
+        return;
+    if (--ksu_kd_retries_left > 0)
+        schedule_delayed_work(&ksu_kd_retry_work, HZ);
+}
+
+static void ksu_schedule_panic_dumper(void)
+{
+    INIT_DELAYED_WORK(&ksu_kd_retry_work, ksu_kd_retry_fn);
+    schedule_delayed_work(&ksu_kd_retry_work, HZ);
+}
+#else
+static void ksu_schedule_panic_dumper(void)
+{
+}
 #endif
 
 static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
@@ -491,19 +539,9 @@ void  __nocfi ksu_syscall_hook_init(void)
     int ni_slot;
 
 // 准备kernel日志存储
-#ifdef KSU_X86_BLACKBOX
-    ksu_panic_buf = vmalloc(65536);
-    ksu_panic_f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
-    if (IS_ERR(ksu_panic_f)) {
-        ksu_panic_f = NULL;
-        ksu_blog("KD: open persistent FAILED\n");
-    } else {
-        ksu_kd.dump = ksu_kd_dump;
-        ksu_kd.max_reason = KMSG_DUMP_MAX;   /* 记录 panic/oops 等所有原因 */
-        ksu_blog("KD: register=%d (panic log -> persistent@768KB)\n",
-                 kmsg_dump_register(&ksu_kd));
-    }
-#endif
+    /* panic dumper 需要 /dev/block/by-name/persistent，早期 init 时可能还没有；
+     * 改成每秒重试（其余 init 不等待它）。 */
+    ksu_schedule_panic_dumper();
 
     memset(syscall_hooks, 0, sizeof(syscall_hooks));
 

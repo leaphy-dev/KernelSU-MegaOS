@@ -345,34 +345,11 @@ void __exit kernelsu_exit(void)
 #if NEED_OWN_STACKPROTECTOR
 module_init(kernelsu_init_early);
 #else
-
-/* ------------------------------------------------------------------
- * 延迟初始化：模块装载时只调度一个 workqueue，15 秒后再做真正的 init。
- * 原因：那些炸点（stop_machine / set_memory_rw 改 .rodata / 14 字节文本覆盖）
- *       都发生在"系统最早、什么都还没就绪"的时刻；推迟到系统起来之后既安全，
- *       又让我们能把每一步日志写进 /data/local/tmp（方便定位）。
- * ------------------------------------------------------------------ */
-static void ksu_deferred_init_fn(struct work_struct *w);
-static DECLARE_DELAYED_WORK(ksu_deferred_init_work, ksu_deferred_init_fn);
-
-static int ksu_boot_stub(void)
-{
-    pr_info("ksu-shim: deferring kernelsu_init by 15s (workqueue)\n");
-    schedule_delayed_work(&ksu_deferred_init_work, 15 * HZ);
-    return 0;
-}
-
-static void ksu_deferred_init_fn(struct work_struct *w)
-{
-    ksu_blog("=== deferred init BEGIN ===\n");
-    pr_info("ksu-shim: deferred kernelsu_init begins\n");
-    kernelsu_init();
-    ksu_blog("=== deferred init RETURNED (no crash) ===\n");
-    pr_info("ksu-shim: deferred kernelsu_init done\n");
-}
-
-module_init(ksu_boot_stub);
-
+/* [KSU-X86-PORT] 与上游一致：模块装载时立即 init（不延迟）。
+ * hook 必须在 zygote/app 启动前就绪，否则管理器的 setresuid 注入会被错过。
+ * /data 相关（allowlist、throne/crown）由 ksud 的 post-fs-data 与
+ * pkg_observer（packages.list fsnotify）在 /data 就绪后完成。 */
+module_init(kernelsu_init);
 #endif
 module_exit(kernelsu_exit);
 
