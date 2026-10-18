@@ -8,6 +8,7 @@
 #include <linux/uaccess.h>
 #include <linux/string.h>
 #include <linux/slab.h>
+#include <linux/timekeeping.h>
 
 static loff_t ksu_blog_persist_pos = 512 * 1024;
 
@@ -54,41 +55,54 @@ static void ksu_blog_to_file(const char *path, const char *buf, int n, const cha
 
 void ksu_blog(const char *fmt, ...)
 {
-	char buf[256];
+	char buf[320];
+	struct timespec64 ts;
 	va_list ap;
-	int n;
+	int n, m;
 
+	/* [KSU-X86-PORT] 每行加开机时间戳（秒.毫秒，自 boot 起），
+	 * 便于判断"崩溃前最后一条日志"与前后事件的时间关系。 */
+	ktime_get_boottime_ts64(&ts);
+	n = snprintf(buf, sizeof(buf), "[%5lld.%03ld] ", (long long)ts.tv_sec,
+		     ts.tv_nsec / 1000000);
+	if (n < 0)
+		n = 0;
 	va_start(ap, fmt);
-	n = vsnprintf(buf, sizeof(buf), fmt, ap);
+	m = vsnprintf(buf + n, sizeof(buf) - n, fmt, ap);
 	va_end(ap);
-	if (n <= 0)
+	if (m <= 0)
 		return;
+	n += m;
 	if (n > (int)sizeof(buf) - 1)
 		n = sizeof(buf) - 1;
 
 	ksu_blog_to_file("/sdcard/ksu-boot.log", buf, n, "sdcard");
 	ksu_blog_to_file("/data/local/tmp/ksu-boot.log", buf, n, "data");
-	ksu_blog_to_persist(buf, n);
 
+	/* [KSU-X86-PORT] 首行状态先落盘，再写本条消息。
+	 * 旧实现顺序相反：状态行写在 512KB 处会覆盖掉第一条日志的前半截
+	 * （之前日志首行变成 "[ksu-blog channels] sdcard=oSTEP: 1" 就是这个原因）。*/
 	if (ksu_blog_first) {
 		char st[200];
-		int m;
+		int k;
 		struct file *f;
 
 		ksu_blog_first = false;
-		m = snprintf(st, sizeof(st), "[ksu-blog channels] %s\n", ksu_blog_status);
-		if (m > 0) {
-			ksu_blog_to_file("/sdcard/ksu-boot.log", st, m, "x");
-			ksu_blog_to_file("/data/local/tmp/ksu-boot.log", st, m, "x");
-		}
-		/* persistent 需要定位到 512KB */
-		f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
-		if (!IS_ERR(f)) {
-			f->f_pos = 512 * 1024;
-			kernel_write(f, st, m, &f->f_pos);
-			filp_close(f, NULL);
+		k = snprintf(st, sizeof(st), "[ksu-blog channels] %s\n", ksu_blog_status);
+		if (k > 0) {
+			ksu_blog_to_file("/sdcard/ksu-boot.log", st, k, "x");
+			ksu_blog_to_file("/data/local/tmp/ksu-boot.log", st, k, "x");
+			f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
+			if (!IS_ERR(f)) {
+				f->f_pos = 512 * 1024;
+				kernel_write(f, st, k, &f->f_pos);
+				ksu_blog_persist_off = 512 * 1024 + k;
+				filp_close(f, NULL);
+			}
 		}
 	}
+
+	ksu_blog_to_persist(buf, n);
 }
 
 #include <linux/export.h>
