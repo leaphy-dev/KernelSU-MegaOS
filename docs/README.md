@@ -42,6 +42,36 @@ Currently, the `arm64-v8a` and `x86_64` architectures are supported.
 - [How to build](https://kernelsu.org/guide/how-to-build.html)
 - [Official website](https://kernelsu.org/)
 
+### MegaOS (H3C MegaBook 14)
+
+This branch is installed by flashing a pre-patched `boot_a` image.
+No kernel rebuild and no fastboot are required.
+
+1. Download `boot_a_megaos-6.12.30-r1.img` and `SHA256SUMS` from the release page.
+2. Open an **Administrator** PowerShell in the directory containing the image.
+3. Run the installer (it checks the image hash, backs up the current `boot_a`,
+   writes the image, and verifies it by reading back):
+
+   ```powershell
+   .\install-megaos.ps1 `
+       -Image .\boot_a_megaos-6.12.30-r1.img `
+       -ExpectedSha256 884152fe86348ed80ae05421e02d5de6b834a76ade35be23f9144984a7a5eb1b `
+       -Backup -SetOneShotBoot
+   ```
+
+   In the source tree the same script is at `scripts/install-megaos.ps1`.
+
+4. Install the official KernelSU manager APK (`me.weishu.kernelsu`).
+5. Reboot. The manager should show **Installed**.
+
+Rollback:
+
+```powershell
+.\install-megaos.ps1 -Restore .\boot_a-backup-YYYYmmdd-HHMMSS.img
+```
+
+> For H3C MegaBook 14 / kernel `6.12.30` / `boot_a` only. Keep a stock backup before flashing.
+
 ## Translation
 
 To help translate KernelSU, we no longer accept translation contributions via Weblate. All translations are now handled using LLMs.

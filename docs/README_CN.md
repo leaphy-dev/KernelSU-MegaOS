@@ -41,6 +41,34 @@ WSA, ChromeOS 和运行在容器上的 Android 也可以与 KernelSU 一起工�
 - [如何构建？](https://kernelsu.org/zh_CN/guide/how-to-build.html)
 - [官方网站](https://kernelsu.org/zh_CN/)
 
+### MegaOS（H3C MegaBook 14）
+
+本分支通过刷入预打包的 `boot_a` 镜像安装，**不需要重新编译内核，也不需要 fastboot**。
+
+1. 从 Release 下载 `boot_a_megaos-6.12.30-r1.img` 和 `SHA256SUMS`。
+2. 在镜像所在目录打开 **管理员** PowerShell。
+3. 运行安装脚本（自动校验 hash、备份当前 `boot_a`、写入并回读校验）：
+
+   ```powershell
+   .\install-megaos.ps1 `
+       -Image .\boot_a_megaos-6.12.30-r1.img `
+       -ExpectedSha256 884152fe86348ed80ae05421e02d5de6b834a76ade35be23f9144984a7a5eb1b `
+       -Backup -SetOneShotBoot
+   ```
+
+   源码树里同一脚本位于 `scripts/install-megaos.ps1`。
+
+4. 安装官方 KernelSU 管理器 APK（`me.weishu.kernelsu`）。
+5. 重启，管理器应显示“已安装”。
+
+回滚：
+
+```powershell
+.\install-megaos.ps1 -Restore .\boot_a-backup-YYYYmmdd-HHMMSS.img
+```
+
+> 仅适用于 H3C MegaBook 14 / 内核 `6.12.30` / `boot_a`；刷写前请保留原厂备份。
+
 ## 参与翻译
 
 要将 KernelSU 翻译成您的语言，或完善现有的翻译，请使用 [Weblate](https://hosted.weblate.org/engage/kernelsu/)。现已不再接受有关管理器翻译的PR，因为这会与Weblate冲突。
