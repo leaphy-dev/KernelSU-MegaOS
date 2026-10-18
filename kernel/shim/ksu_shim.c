@@ -3,14 +3,14 @@
  * KernelSU LKM 救援层（x86_64 / non-GKI）
  *
  * 背景：
- *   本设备内核（6.12.30-ga86c39fcddce，non-GKI）没有导出 KernelSU 需要的
+ *   H3C MegaBook 14 内核（6.12.30-ga86c39fcddce，non-GKI）没有导出 KernelSU 需要的
  *   ~58 个符号，因此官方 LKM 无法加载。本文件不修改 KernelSU 的任何逻辑，
  *   只做一件事：在模块内用【同名定义】满足这些引用，真实地址改为运行时解析。
  *
  *   ① 引导：用 kprobe 技巧拿到 kallsyms_lookup_name 的真实地址
- *           （register_kprobe 是本设备【已导出】的符号）
+ *           （register_kprobe 是 H3C MegaBook 14【已导出】的符号）
  *   ② 函数：同名 wrapper，内部转发到解析出的函数指针
- *   ③ 数据：见 ksu_shim_data_addr()（本设备 KALLSYMS_ALL=n，数据符号不在
+ *   ③ 数据：见 ksu_shim_data_addr()（H3C MegaBook 14 KALLSYMS_ALL=n，数据符号不在
  *           kallsyms 里，需靠 _stext 偏移表，见 ksu_data_syms[]）
  *
  * 所有壳在解析失败时都【安全返回/使用哑对象】，绝不空指针解引用。
@@ -92,7 +92,7 @@ typedef int (*ksu_klso_t)(unsigned long, unsigned long *, unsigned long *);
 
 /* ==================================================================
  * ② 函数壳
- *    注意：本设备内核 kallsyms 只含文本符号（KALLSYMS_ALL=n），
+ *    注意：H3C MegaBook 14 内核 kallsyms 只含文本符号（KALLSYMS_ALL=n），
  *    所以这些【函数】都能被解析到；数据对象走 ③。
  * ================================================================== */
 
@@ -208,7 +208,7 @@ SHIM_FN(void *, symtab_search, (struct symtab *s, const char *name), (s, name), 
 /* ==================================================================
  * ③ 数据对象：运行时解析
  *
- * 本设备 CONFIG_KALLSYMS_ALL=n → 数据符号【不在 kallsyms 里】，另辟蹊径：
+ * H3C MegaBook 14 CONFIG_KALLSYMS_ALL=n → 数据符号【不在 kallsyms 里】，另辟蹊径：
  *   A) 引用反查：从"已知函数"的机器码里抠出 RIP 相对引用目标
  *      （候选函数名单是【离线在我们自己的 vmlinux 上验证过】的）
  *   B) 结构模式扫描：tracepoint 指针表 / proc_ns_operations
@@ -786,7 +786,7 @@ struct tracepoint __tracepoint_sys_enter;
 /* ==================================================================
  * ⑤ 绕过符号版本(CRC)校验
  *
- * 本设备 CONFIG_MODVERSIONS=y 且 MODULE_FORCE_LOAD 未开：正常情况下模块里
+ * H3C MegaBook 14 CONFIG_MODVERSIONS=y 且 MODULE_FORCE_LOAD 未开：正常情况下模块里
  * 每个被引用符号的 CRC 都必须与内核一致，否则 insmod 直接失败
  * （而没 root 就没法在设备上试错）。
  *
@@ -798,7 +798,7 @@ struct tracepoint __tracepoint_sys_enter;
  *     }
  * 所以只要让模块里【存在】__version_ext_crcs 段、且不列出任何被引用的符号，
  * 所有版本校验（含 module_layout）都会放行。
- * 代价：失去"ABI 不一致就拒绝加载"这层保护（本机配置/头文件与设备同源，风险低），
+ * 代价：失去"ABI 不一致就拒绝加载"这层保护（H3C MegaBook 14 配置/头文件与设备同源，风险低），
  *       并且每个符号会在 dmesg 留一行 once 警告（正好当清单用）。
  * ================================================================== */
 static const u32 ksu_version_ext_crcs[] __used
