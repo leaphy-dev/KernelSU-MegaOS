@@ -5,7 +5,8 @@
 > [!NOTE]
 > **MegaOS 移植分支：** 本分支是面向 **H3C MegaBook 14 / MegaOS（Android 14，内核 6.12.30）**
 > 的非官方 x86_64 LKM 适配，**不修改厂商内核**，与 KernelSU 上游项目无隶属关系。
-> 版本与构建说明见仓库根目录的 [`README.md`](../README.md)。
+> 版本 `megaos-6.12.30-r1`；模块 `lkm-x86_64-megaos-android14-6.12_kernelsu.ko`；
+> 构建入口 `kernel/build-megaos-x64.sh`。
 
 <img src="https://kernelsu.org/logo.png" style="width: 96px;" alt="logo">
 
