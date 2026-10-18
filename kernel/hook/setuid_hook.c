@@ -21,6 +21,8 @@
 #include "hook/tp_marker.h"
 #include "feature/kernel_umount.h"
 
+extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */ // IWYU pragma: keep
+
 int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid)
 {
     // we rely on the fact that zygote always call setresuid(3) with same uids
@@ -34,6 +36,7 @@ int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid)
         spin_unlock_irq(&current->sighand->siglock);
 
         pr_info("install fd for manager: %d\n", new_uid);
+        ksu_blog("install fd for manager: %d\n", new_uid);
         ksu_install_fd();
         return 0;
     }

@@ -37,7 +37,7 @@ long ksu_call_syscall(int nr, const struct pt_regs *regs)
  * 约定：所有非上游改动一律以 [KSU-X86-PORT] 标注，并写清
  *       「改了什么 / 为什么（证据）/ 不改会怎样」；改逻辑时保留原逻辑注释，便于回退。
  *
- * 关键背景（均为设备实测，详见《踩坑记录.md》）：
+ * 关键背景（均为设备实测）：
  *  1) 6.12 的 x64_sys_call 是【生成的 switch】，不引用 sys_call_table；
  *     但 sys_call_table 本身仍是正确的（[0]=__x64_sys_read，[1]=__x64_sys_write）。
  *  2) 入口前 4 字节运行时有两种形态：endbr64，或被 IBT 封存成 4 字节 NOP
@@ -199,7 +199,6 @@ static int ksu_find_ni_syscall_slots(int *out_slots, int max_slots)
 // otherwise it's a spurious call — return -ENOSYS.
 static long __nocfi ksu_syscall_dispatcher(const struct pt_regs *regs)
 {
-    { static int n; if (n < 5) { n++; ksu_blog("  dispatcher: entered orig_ax=%ld ax=%ld\n", (long)regs->orig_ax, (long)regs->ax); } }
     if (regs->orig_ax != ksu_dispatcher_nr)
         return -ENOSYS;
 
@@ -271,57 +270,7 @@ static void *ksu_tramp;                /* 原地蹦床：endbr64 + 12B 回放 + 
 static char x64_sys_call_patch_orig_insn[KSU_X64_PATCH_LEN];
 
 
-/* ================= KSU 黑匣子：记录最近的 syscall nr =================
- * 目的：崩溃时能知道"内核正在处理哪个系统调用"（崩溃点常在这一层之下）。
- * 做法：每次 syscall 写入内存环形缓冲（无 I/O）；每秒把最近 64 个 nr 落盘一次。
- * =================================================================== */
-#define KSU_SYSNO_RING 64
-static u32 ksu_sysno_ring[KSU_SYSNO_RING];
-static u32 ksu_sysno_idx;
-static u32 ksu_sysno_total;
-static struct delayed_work ksu_sysno_work;
-static bool ksu_sysno_work_started;
-
-static void ksu_sysno_flush_now(void);
-
-static void ksu_sysno_flush(struct work_struct *w)
-{
-	char b[640];
-	int n = 0, i;
-	unsigned int start;
-
-	n += snprintf(b + n, sizeof(b) - n, "SYSCALLS total=%u idx=%u ring:", ksu_sysno_total, ksu_sysno_idx);
-	start = (ksu_sysno_idx >= KSU_SYSNO_RING) ? (ksu_sysno_idx - KSU_SYSNO_RING) : 0;
-	for (i = 0; i < KSU_SYSNO_RING && n < (int)sizeof(b) - 16; i++) {
-		u32 v = ksu_sysno_ring[(start + i) % KSU_SYSNO_RING];
-		n += snprintf(b + n, sizeof(b) - n, " %u", v);
-	}
-	n += snprintf(b + n, sizeof(b) - n, "\n");
-	ksu_blog("%s", b);
-	schedule_delayed_work(&ksu_sysno_work, msecs_to_jiffies(300));
-}
-
-/* KSU 关心的系统调用：立即同步落盘一次（这些调用很稀少，开销可忽略）*/
-static void ksu_sysno_flush_now(void)
-{
-	if (ksu_sysno_work_started)
-		ksu_sysno_flush(NULL);
-}
-
 #ifdef KSU_X86_BLACKBOX
-/* [KSU-X86-PORT][DIAG] 系统调用心跳（代替"每次 syscall 写盘"的黑匣子）：
- *  - 每个 syscall 只做几次内存写（无 I/O，开销可忽略）
- *  - 每 500ms 把 "总次数 + 最近 16 个 nr" 落盘一次
- * 用途：① 用 HB 的 n 是否增长，证明补丁到底有没有在执行；
- *       ② 崩溃后能看到临死前最后若干 syscall。
- * 注意：上一版在第一次 syscall 时 filp_open 失败就永久关闭了黑匣子
- *       （那时 /dev 还没建好）⇒ 一个字节都没写，看起来像"补丁没执行"。
- * 诊断完成后应移除。 */
-static u32 ksu_hb_ring[16];
-static u32 ksu_hb_idx;
-static unsigned long ksu_hb_count;
-static struct delayed_work ksu_hb_work;
-
 /* [KSU-X86-PORT][DIAG] panic 时把内核日志（含 oops 回溯）写到
  * persistent@768KB。文件在 init 阶段预先打开，panic 路径只做 kernel_write，
  * 尽量避免在崩溃时做路径查找。 */
@@ -347,40 +296,13 @@ static void ksu_kd_dump(struct kmsg_dumper *d, struct kmsg_dump_detail *detail)
     kernel_write(ksu_panic_f, ksu_panic_buf, len, &ksu_panic_f->f_pos);
 }
 
-static void ksu_hb_flush(struct work_struct *w)
-{
-    static unsigned long last;
-    char b[192];
-    int n = 0, i;
-    u32 start;
-
-    if (ksu_hb_count != last) {
-        last = ksu_hb_count;
-        n += snprintf(b + n, sizeof(b) - n, "HB n=%lu last=", ksu_hb_count);
-        start = (ksu_hb_idx >= 16) ? (ksu_hb_idx - 16) : 0;
-        for (i = 0; i < 16 && n < (int)sizeof(b) - 12; i++)
-            n += snprintf(b + n, sizeof(b) - n, "%u ", ksu_hb_ring[(start + i) & 15]);
-        n += snprintf(b + n, sizeof(b) - n, "\n");
-        if (n > 0)
-            ksu_blog("%s", b);
-    }
-    schedule_delayed_work(&ksu_hb_work, msecs_to_jiffies(500));
-}
 #endif
 
 static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
 {
-#ifdef KSU_X86_BLACKBOX
-    ksu_hb_ring[ksu_hb_idx & 15] = nr;
-    ksu_hb_idx++;
-    ksu_hb_count++;
-#endif
     /* KSU 只关心被 tracepoint 改写成 dispatcher 槽位的调用；其余交回内核 */
-    if ((int)nr == ksu_dispatcher_nr) {
-        ksu_sysno_ring[ksu_sysno_idx % KSU_SYSNO_RING] = nr;
-        ksu_sysno_idx++; ksu_sysno_total++;
+    if ((int)nr == ksu_dispatcher_nr)
         return ksu_syscall_dispatcher(regs);
-    }
     /* [KSU-X86-PORT] 管理器驱动 fd 的兜底注入：
      * 正常路径是 hook manager 的 setresuid 钩子（ksu_handle_setresuid）注入 fd；
      * 这里保留 execve 成功后的兜底（某些启动方式不经过 setresuid 钩子）。
@@ -408,30 +330,6 @@ static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
     if (ksu_tramp)
         return ((long (*)(const struct pt_regs *, unsigned int))ksu_tramp)(regs, nr);
     return -ENOSYS;
-}
-
-static long my_x64_sys_call_unused(const struct pt_regs *regs, unsigned int nr)
-{
-    /* 黑匣子：无 I/O，只写内存 */
-    ksu_sysno_ring[ksu_sysno_idx % KSU_SYSNO_RING] = nr;
-    ksu_sysno_idx++;
-    ksu_sysno_total++;
-    if (!ksu_sysno_work_started) {
-        ksu_sysno_work_started = true;
-        INIT_DELAYED_WORK(&ksu_sysno_work, ksu_sysno_flush);
-        schedule_delayed_work(&ksu_sysno_work, msecs_to_jiffies(300));
-    }
-    /* 47=recvfrom? 无；这里列 KSU 关心的：113 setreuid,117 setresuid,157 prctl,
-     * 169 reboot,59 execve,322 execveat,269 faccessat,439 faccessat2 */
-    switch (nr) {
-    case 59: case 322: case 113: case 117: case 157: case 169: case 269: case 439:
-        ksu_blog("SYSCALL-INTERESTING nr=%u\n", nr);
-        ksu_sysno_flush_now();
-        break;
-    default:
-        break;
-    }
-    return ksu_syscall_table[nr](regs);
 }
 
 // avd 13-5.15 missing this commit:
@@ -594,10 +492,6 @@ void  __nocfi ksu_syscall_hook_init(void)
 #endif
 
 #ifdef KSU_X86_BLACKBOX
-    INIT_DELAYED_WORK(&ksu_hb_work, ksu_hb_flush);
-    schedule_delayed_work(&ksu_hb_work, msecs_to_jiffies(500));
-    ksu_blog("HB: started (dispatcher_nr=%d)\n", ksu_dispatcher_nr);
-
     ksu_panic_buf = vmalloc(65536);
     ksu_panic_f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
     if (IS_ERR(ksu_panic_f)) {

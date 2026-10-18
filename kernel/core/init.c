@@ -48,7 +48,7 @@ void ksu_blog(const char *fmt, ...)
 	va_list ap;
 	int n, m;
 
-	/* [KSU-X86-PORT] 时间戳前缀（上游没有） */
+	/* [KSU-X86-PORT] 时间戳前缀 */
 	ktime_get_boottime_ts64(&ts);
 	n = snprintf(buf, sizeof(buf), "[%5lld.%03ld] ", (long long)ts.tv_sec,
 		     ts.tv_nsec / 1000000);
