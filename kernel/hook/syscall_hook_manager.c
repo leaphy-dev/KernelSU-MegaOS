@@ -6,6 +6,10 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
+#include <linux/jump_label.h>
+#include <linux/sched/task.h>
+#include <linux/sched/signal.h>
+#include <linux/thread_info.h>
 #include <trace/events/syscalls.h>
 
 #include <linux/version.h>
@@ -104,11 +108,25 @@ static void ksu_tp_diag_fn(struct work_struct *w);
 static DECLARE_DELAYED_WORK(ksu_tp_diag_work, ksu_tp_diag_fn);
 static int ksu_tp_diag_left = 20;
 
+extern struct tracepoint __tracepoint_sys_enter;
+
 static void ksu_tp_diag_fn(struct work_struct *w)
 {
-    ksu_blog("TPDIAG calls=%lu compat=%lu nohook=%lu redir=%lu disp=%lu bad=%lu hook=%lu\n",
+    struct task_struct *p, *t;
+    int tp_set = 0, tp_total = 0;
+
+    read_lock(&tasklist_lock);
+    for_each_process_thread(p, t) {
+        tp_total++;
+        if (test_task_syscall_work(t, SYSCALL_TRACEPOINT))
+            tp_set++;
+    }
+    read_unlock(&tasklist_lock);
+
+    ksu_blog("TPDIAG calls=%lu compat=%lu nohook=%lu redir=%lu disp=%lu bad=%lu hook=%lu key=%d tpset=%d/%d\n",
              ksu_tp_calls, ksu_tp_compat, ksu_tp_nohook, ksu_tp_redir,
-             ksu_disp_calls, ksu_disp_bad, ksu_hook_setresuid_calls);
+             ksu_disp_calls, ksu_disp_bad, ksu_hook_setresuid_calls,
+             static_key_enabled(&__tracepoint_sys_enter.key), tp_set, tp_total);
     if (--ksu_tp_diag_left > 0)
         schedule_delayed_work(&ksu_tp_diag_work, msecs_to_jiffies(15000));
 }
@@ -185,6 +203,17 @@ void  ksu_syscall_hook_manager_init(void)
     } else {
         pr_info("hook_manager: sys_enter tracepoint registered\n");
         ksu_blog("hook_manager: sys_enter tracepoint registered\n");
+    }
+
+    /* [KSU-X86-PORT][DIAG] 兜底：确保所有任务都带 SYSCALL_TRACEPOINT 工作位。
+     * tracepoint 的 regfunc 只在 static key 首次启用时执行；若 key 已被别的
+     * tracer 提前启用，新任务之外的位可能不完整。这里幂等补一次。 */
+    {
+        struct task_struct *p, *t;
+        read_lock(&tasklist_lock);
+        for_each_process_thread(p, t)
+            set_task_syscall_work(t, SYSCALL_TRACEPOINT);
+        read_unlock(&tasklist_lock);
     }
 #endif
 
