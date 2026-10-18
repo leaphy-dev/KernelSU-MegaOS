@@ -269,7 +269,7 @@ long ksu_handle_execveat_sucompat(const char __user **filename_user, int orig_nr
 }
 
 // sucompat: permitted process can execute 'su' to gain root access.
-void __init ksu_sucompat_init()
+void  ksu_sucompat_init()
 {
     if (ksu_register_feature_handler(&su_compat_handler)) {
         pr_err("Failed to register su_compat feature handler\n");

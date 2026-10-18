@@ -1,4 +1,5 @@
 #include "ksu.h"
+extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */
 #include "linux/cred.h"
 #include "linux/namei.h"
 #include "util.h"
@@ -230,6 +231,7 @@ static bool is_uid_exist(uid_t uid, char *package, void *data)
 
 void track_throne(bool prune_only)
 {
+    { static int n; if (n < 4) { n++; ksu_blog("  throne: track_throne enter\n"); } }
     mutex_lock(&throne_tracker_mutex);
     const struct cred *old_cred = override_creds(ksu_cred);
     struct file *fp = filp_open(SYSTEM_PACKAGES_LIST_PATH, O_RDONLY, 0);
@@ -360,7 +362,7 @@ out_revert_cred:
     mutex_unlock(&throne_tracker_mutex);
 }
 
-void __init ksu_throne_tracker_init()
+void  ksu_throne_tracker_init()
 {
     // nothing to do
 }

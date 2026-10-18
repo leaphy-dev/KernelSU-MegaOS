@@ -43,7 +43,7 @@ static const struct kernel_param_ops block_modules_param_ops = {
 module_param_cb(block_modules, &block_modules_param_ops, NULL, 0);
 
 // Merge the configured names into the kernel's native module_blacklist.
-void __init ksu_module_blacklist_init(void)
+void  ksu_module_blacklist_init(void)
 {
     char **native_blacklist;
     const char *existing;

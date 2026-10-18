@@ -896,7 +896,7 @@ long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void 
     return -ENOTTY;
 }
 
-void __init ksu_supercall_dump_commands(void)
+void  ksu_supercall_dump_commands(void)
 {
     int i;
 

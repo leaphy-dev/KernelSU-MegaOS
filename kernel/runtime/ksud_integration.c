@@ -650,7 +650,7 @@ void ksu_stop_input_hook_runtime(void)
 }
 
 // ksud: module support
-void __init ksu_ksud_init()
+void  ksu_ksud_init()
 {
     int ret;
 

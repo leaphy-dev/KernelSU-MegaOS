@@ -1,3 +1,96 @@
+
+/* ================= KSU_X86_BOOT_LOG =================
+ * 双通道落盘日志：/data/local/tmp/ksu-boot.log + persistent@512KB
+ * 全部 O_SYNC，保证崩溃/重启也不丢；日志最后一行 = 崩溃点。
+ * ================================================== */
+#include <linux/fs.h>
+#include <linux/file.h>
+#include <linux/uaccess.h>
+#include <linux/string.h>
+#include <linux/slab.h>
+
+static loff_t ksu_blog_persist_pos = 512 * 1024;
+
+static bool ksu_blog_first = true;
+static char ksu_blog_status[160];
+
+
+static loff_t ksu_blog_persist_off;
+
+/* persistent：从 512KB 起【顺序追加】；每次开机 statics 归零 ⇒ 每次开机从头重写 ✓
+ * 直接读裸设备 + O_SYNC ⇒ 崩溃/重启都不丢 ✓ */
+static void ksu_blog_to_persist(const char *buf, int n)
+{
+	struct file *f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
+
+	if (IS_ERR(f))
+		return;
+	if (ksu_blog_persist_off == 0)
+		ksu_blog_persist_off = 512 * 1024;
+	f->f_pos = ksu_blog_persist_off;
+	if (kernel_write(f, buf, n, &f->f_pos) == n)
+		ksu_blog_persist_off += n;
+	filp_close(f, NULL);
+}
+
+static void ksu_blog_to_file(const char *path, const char *buf, int n, const char *tag)
+{
+	struct file *f = filp_open(path, O_WRONLY | O_CREAT | O_APPEND | O_SYNC, 0644);
+
+	if (IS_ERR(f)) {
+		if (ksu_blog_first) {
+			strlcat(ksu_blog_status, tag, sizeof(ksu_blog_status));
+			strlcat(ksu_blog_status, "=ERR ", sizeof(ksu_blog_status));
+		}
+		return;
+	}
+	kernel_write(f, buf, n, &f->f_pos);
+	filp_close(f, NULL);
+	if (ksu_blog_first) {
+		strlcat(ksu_blog_status, tag, sizeof(ksu_blog_status));
+		strlcat(ksu_blog_status, "=ok ", sizeof(ksu_blog_status));
+	}
+}
+
+void ksu_blog(const char *fmt, ...)
+{
+	char buf[256];
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	if (n <= 0)
+		return;
+	if (n > (int)sizeof(buf) - 1)
+		n = sizeof(buf) - 1;
+
+	ksu_blog_to_file("/sdcard/ksu-boot.log", buf, n, "sdcard");
+	ksu_blog_to_file("/data/local/tmp/ksu-boot.log", buf, n, "data");
+	ksu_blog_to_persist(buf, n);
+
+	if (ksu_blog_first) {
+		char st[200];
+		int m;
+		struct file *f;
+
+		ksu_blog_first = false;
+		m = snprintf(st, sizeof(st), "[ksu-blog channels] %s\n", ksu_blog_status);
+		if (m > 0) {
+			ksu_blog_to_file("/sdcard/ksu-boot.log", st, m, "x");
+			ksu_blog_to_file("/data/local/tmp/ksu-boot.log", st, m, "x");
+		}
+		/* persistent 需要定位到 512KB */
+		f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
+		if (!IS_ERR(f)) {
+			f->f_pos = 512 * 1024;
+			kernel_write(f, st, m, &f->f_pos);
+			filp_close(f, NULL);
+		}
+	}
+}
+
 #include <linux/export.h>
 #include <linux/fs.h>
 #include <linux/kobject.h>
@@ -49,7 +142,7 @@
 #include <linux/random.h>
 unsigned long __stack_chk_guard __ro_after_init __attribute__((visibility("hidden")));
 
-__attribute__((no_stack_protector)) void __init ksu_setup_stack_chk_guard()
+__attribute__((no_stack_protector)) void  ksu_setup_stack_chk_guard()
 {
     unsigned long canary;
 
@@ -60,7 +153,7 @@ __attribute__((no_stack_protector)) void __init ksu_setup_stack_chk_guard()
     __stack_chk_guard = canary;
 }
 
-__attribute__((naked)) int __init kernelsu_init_early(void)
+__attribute__((naked)) int  kernelsu_init_early(void)
 {
     asm("mov x19, x30;\n"
         "bl ksu_setup_stack_chk_guard;\n"
@@ -90,10 +183,19 @@ bool ksu_bundled = false;
 module_param_named(bundled, ksu_bundled, bool, 0);
 #endif
 
-int __init kernelsu_init(void)
+
+#ifdef KSU_X86_BAIL_AT
+#define KSU_BAIL(n) do { if (KSU_X86_BAIL_AT <= (n)) { pr_info("ksu-shim: BAIL@%d\n", (n)); return 0; } } while (0)
+#else
+#define KSU_BAIL(n) do { } while (0)
+#endif
+
+int  kernelsu_init(void)
 {
+    KSU_BAIL(1);
     pr_info("welcome to KernelSU version " __stringify(KERNEL_SU_VERSION) ", package name " KSU_PACKAGE_NAME "\n");
 #if defined(__x86_64__) && !defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)
+#ifndef KSU_X86_SKIP_INDIRECT_SAFE_CHECK
     // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set
     if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE)) {
         pr_alert("*************************************************************");
@@ -107,6 +209,7 @@ int __init kernelsu_init(void)
         pr_alert("*************************************************************");
         return -ENOSYS;
     }
+#endif /* !KSU_X86_SKIP_INDIRECT_SAFE_CHECK */
 #endif
 
 #ifdef MODULE
@@ -128,28 +231,46 @@ int __init kernelsu_init(void)
         pr_alert("shell is allowed at init!");
     }
 
+    ksu_blog("STEP: 1 prepare_creds\n");
     ksu_cred = prepare_creds();
     if (!ksu_cred) {
         pr_err("prepare cred failed!\n");
         return -ENOSYS;
     }
 
+    KSU_BAIL(2);
+    ksu_blog("STEP: 2 init_symbol_resolver(SKIPPED)\n");
     ksu_init_symbol_resolver();
+    KSU_BAIL(3);
+    ksu_blog("STEP: 3 syscall_hook_init\n");
     ksu_syscall_hook_init();
 
+    KSU_BAIL(4);
     // Block modules early, before vendor modules are loaded in second stage.
+    ksu_blog("STEP: 4 module_blacklist_init\n");
     ksu_module_blacklist_init();
 
+    KSU_BAIL(5);
+    ksu_blog("STEP: 5 feature_init\n");
     ksu_feature_init();
+    ksu_blog("STEP: 6 sulog_init\n");
     ksu_sulog_init();
+    ksu_blog("STEP: 7 adb_root_init\n");
     ksu_adb_root_init();
+    ksu_blog("STEP: 8 lsm_hook_init\n");
     ksu_lsm_hook_init();
+    ksu_blog("STEP: 9 selinux_hide_init\n");
     ksu_selinux_hide_init();
+    ksu_blog("STEP: 10 shell_su_adb_only_init\n");
     ksu_shell_su_adb_only_init();
 
+    KSU_BAIL(6);
+    ksu_blog("STEP: 11 supercalls_init\n");
     ksu_supercalls_init();
+    ksu_blog("STEP: 12 app_profile_init\n");
     ksu_app_profile_init();
 
+    KSU_BAIL(7);
     if (ksu_late_loaded) {
         pr_info("late load mode, skipping kprobe hooks\n");
 
@@ -162,13 +283,21 @@ int __init kernelsu_init(void)
         // can continue to access /data/app etc. after enforcement.
         escape_to_root_for_init();
 
+    ksu_blog("STEP: 14 allowlist_init\n");
         ksu_allowlist_init();
         ksu_load_allow_list();
 
+    ksu_blog("STEP: 13 syscall_hook_manager_init(late)\n");
+#ifndef KSU_X86_SKIP_HOOK_MANAGER
         ksu_syscall_hook_manager_init();
+#else
+        ksu_blog("STEP 13 syscall_hook_manager_init SKIPPED\n");
+#endif
 
+    ksu_blog("STEP: 15 throne_tracker_init\n");
         ksu_throne_tracker_init();
         ksu_observer_init();
+    ksu_blog("STEP: 17 file_wrapper_init\n");
         ksu_file_wrapper_init();
 
         ksu_boot_completed = true;
@@ -188,11 +317,14 @@ int __init kernelsu_init(void)
 
         ksu_throne_tracker_init();
 
-        ksu_ksud_init();
+    ksu_blog("STEP: 16 ksud_init\n");
+        ksu_ksud_init();    KSU_BAIL(8);
+
 
         ksu_file_wrapper_init();
     }
 
+    KSU_BAIL(9);
 #ifdef MODULE
 #ifndef CONFIG_KSU_DEBUG
     kobject_del(&THIS_MODULE->mkobj.kobj);
@@ -235,7 +367,34 @@ void __exit kernelsu_exit(void)
 #if NEED_OWN_STACKPROTECTOR
 module_init(kernelsu_init_early);
 #else
-module_init(kernelsu_init);
+
+/* ------------------------------------------------------------------
+ * 延迟初始化：模块装载时只调度一个 workqueue，15 秒后再做真正的 init。
+ * 原因：那些炸点（stop_machine / set_memory_rw 改 .rodata / 14 字节文本覆盖）
+ *       都发生在"系统最早、什么都还没就绪"的时刻；推迟到系统起来之后既安全，
+ *       又让我们能把每一步日志写进 /data/local/tmp（方便定位）。
+ * ------------------------------------------------------------------ */
+static void ksu_deferred_init_fn(struct work_struct *w);
+static DECLARE_DELAYED_WORK(ksu_deferred_init_work, ksu_deferred_init_fn);
+
+static int ksu_boot_stub(void)
+{
+    pr_info("ksu-shim: deferring kernelsu_init by 15s (workqueue)\n");
+    schedule_delayed_work(&ksu_deferred_init_work, 15 * HZ);
+    return 0;
+}
+
+static void ksu_deferred_init_fn(struct work_struct *w)
+{
+    ksu_blog("=== deferred init BEGIN ===\n");
+    pr_info("ksu-shim: deferred kernelsu_init begins\n");
+    kernelsu_init();
+    ksu_blog("=== deferred init RETURNED (no crash) ===\n");
+    pr_info("ksu-shim: deferred kernelsu_init done\n");
+}
+
+module_init(ksu_boot_stub);
+
 #endif
 module_exit(kernelsu_exit);
 

@@ -144,7 +144,7 @@ static struct kprobe reboot_kp = {
     .pre_handler = reboot_handler_pre,
 };
 
-void __init ksu_supercalls_init(void)
+void  ksu_supercalls_init(void)
 {
     int rc;
 

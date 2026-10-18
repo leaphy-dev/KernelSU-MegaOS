@@ -101,7 +101,7 @@ static const struct kernel_param_ops force_feature_param_ops = {
 };
 module_param_cb(force_feature, &force_feature_param_ops, NULL, 0);
 
-int __init ksu_register_feature_handler(const struct ksu_feature_handler *handler)
+int  ksu_register_feature_handler(const struct ksu_feature_handler *handler)
 {
     if (!handler) {
         pr_err("feature: register handler is NULL\n");
@@ -276,7 +276,7 @@ void ksu_feature_apply_forced(void)
     mutex_unlock(&feature_mutex);
 }
 
-void __init ksu_feature_init(void)
+void  ksu_feature_init(void)
 {
     int i;
 

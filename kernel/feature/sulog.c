@@ -36,7 +36,7 @@ bool ksu_sulog_is_enabled(void)
     return ksu_sulog_enabled;
 }
 
-void __init ksu_sulog_init(void)
+void  ksu_sulog_init(void)
 {
     int ret;
 

@@ -557,7 +557,7 @@ static void hook_selinux_status_open()
     }
 }
 
-void __init ksu_selinux_hide_init()
+void  ksu_selinux_hide_init()
 {
     if (ksu_register_feature_handler(&selinux_hide_handler)) {
         pr_err("Failed to register selinux_hide feature handler\n");

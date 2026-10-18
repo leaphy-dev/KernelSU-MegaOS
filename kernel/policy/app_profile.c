@@ -237,7 +237,7 @@ void escape_to_root_for_init(void)
     commit_creds(cred);
 }
 
-void __init ksu_app_profile_init(void)
+void  ksu_app_profile_init(void)
 {
 #if NEED_BACKPORT_COMPAT
     unsigned long size = 0;
