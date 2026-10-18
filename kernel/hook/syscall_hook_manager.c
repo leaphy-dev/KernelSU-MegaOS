@@ -143,6 +143,9 @@ void  ksu_syscall_hook_manager_init(void)
     ksu_register_syscall_hook(__NR_newfstatat, ksu_hook_newfstatat);
     ksu_register_syscall_hook(__NR_faccessat, ksu_hook_faccessat);
 
+    ksu_blog("hook_manager: setresuid hooked=%d execve=%d\n",
+             ksu_has_syscall_hook(__NR_setresuid), ksu_has_syscall_hook(__NR_execve));
+
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
     ret = register_trace_prio_sys_enter(ksu_sys_enter_handler, NULL, INT_MIN);
 #ifndef CONFIG_KRETPROBES

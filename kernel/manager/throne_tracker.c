@@ -17,6 +17,11 @@ extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */
 #include "manager/manager_identity.h"
 #include "manager/throne_tracker.h"
 
+/* [KSU-X86-PORT][DIAG] packages.list 中 KSU_PACKAGE_NAME 的 uid。
+ * appid（ksu_manager_appid）只有签名校验通过才会设置；
+ * 这个变量保留"包名找到了、但签名没过"的场景，便于日志区分。 */
+uid_t ksu_seen_manager_uid = KSU_INVALID_APPID;
+
 static DEFINE_MUTEX(throne_tracker_mutex);
 
 uid_t ksu_manager_appid = KSU_INVALID_APPID;
@@ -41,6 +46,7 @@ static void crown_manager(const char *apk, struct list_head *uid_data)
     list_for_each_entry (np, list, list) {
         if (strncmp(np->package, KSU_PACKAGE_NAME, KSU_MAX_PACKAGE_NAME) == 0) {
             pr_info("Crowning manager: uid=%d\n", np->uid);
+            ksu_blog("throne: crowned uid=%d\n", np->uid);
             ksu_set_manager_appid(np->uid);
             break;
         }
@@ -167,6 +173,7 @@ static void search_manager(const char *path, int depth, struct list_head *uid_da
             struct file *file = ksu_filp_open_nonotify(pos->dirpath, O_RDONLY | O_NOFOLLOW | O_NOATIME | O_DIRECTORY);
             if (IS_ERR(file)) {
                 pr_err("Failed to open directory: %s, err: %ld\n", pos->dirpath, PTR_ERR(file));
+                ksu_blog("throne: open %s failed %ld\n", pos->dirpath, PTR_ERR(file));
                 goto skip_iterate;
             }
 
@@ -199,6 +206,7 @@ static void search_manager(const char *path, int depth, struct list_head *uid_da
 
             bool is_manager = is_manager_apk(candidate_path);
             pr_info("Found manager base.apk at path: %s, is_manager: %d\n", candidate_path, is_manager);
+            ksu_blog("throne: candidate is_manager=%d\n", is_manager);
 
             // Only crown if signature verification pass
             if (unlikely(!is_manager))
@@ -237,6 +245,7 @@ void track_throne(bool prune_only)
     struct file *fp = filp_open(SYSTEM_PACKAGES_LIST_PATH, O_RDONLY, 0);
     if (IS_ERR(fp)) {
         pr_err("%s: open " SYSTEM_PACKAGES_LIST_PATH " failed: %ld\n", __func__, PTR_ERR(fp));
+        ksu_blog("throne: open packages.list failed %ld\n", PTR_ERR(fp));
         goto out_revert_cred;
     }
 
@@ -284,6 +293,8 @@ void track_throne(bool prune_only)
         }
         data->uid = res;
         strscpy(data->package, package, sizeof(data->package));
+        if (strstr(package, "kernelsu"))
+            ksu_blog("throne: pkg=%s uid=%u\n", package, res);
         list_add_tail(&data->list, &uid_list);
         // reset line start
         line_start = pos;
@@ -309,12 +320,16 @@ void track_throne(bool prune_only)
 
     if (manager_package_uid == KSU_INVALID_APPID) {
         cached_manager_apk_path[0] = 0;
+        ksu_blog("throne: " KSU_PACKAGE_NAME " not in packages.list\n");
         if (ksu_is_manager_appid_valid()) {
             pr_info("manager is uninstalled, invalidate it!\n");
             ksu_invalidate_manager_uid();
             goto prune;
         }
     } else {
+        ksu_seen_manager_uid = manager_package_uid;
+        ksu_blog("throne: " KSU_PACKAGE_NAME " uid=%d appid=%d\n",
+                 manager_package_uid, ksu_get_manager_appid());
         if (!ksu_is_manager_appid_valid()) {
             need_rescan = true;
         } else if (unlikely(np->uid != ksu_get_manager_appid())) {
