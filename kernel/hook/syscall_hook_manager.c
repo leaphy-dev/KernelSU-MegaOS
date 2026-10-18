@@ -59,7 +59,6 @@ static void destroy_kretprobe(struct kretprobe **rp_ptr)
 
 static int syscall_regfunc_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    { static int n; if (n < 3) { n++; ksu_blog("  regfunc: called (another tracepoint registering)\n"); } }
     unsigned long flags;
     ksu_tp_marker_lock(&flags);
     if (ksu_tp_marker_reg_count() < 1) {
@@ -98,7 +97,6 @@ static struct kretprobe *syscall_unregfunc_rp = NULL;
 // sys_enter handler: redirect hooked syscalls to the dispatcher
 static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 {
-    { static int n; if (n < 8) { n++; ksu_blog("  tp: sys_enter id=%ld hooked=%d\n", id, (int)ksu_has_syscall_hook((int)id)); } }
 #if defined(__x86_64__)
     if (unlikely(in_compat_syscall()))
 #elif defined(__aarch64__) || defined(__riscv)

@@ -10,6 +10,15 @@ typedef long (*syscall_fn_t)(const struct pt_regs *);
 
 extern syscall_fn_t *ksu_syscall_table;
 
+/* [KSU-X86-PORT] 通过 sys_call_table 调用原系统调用。
+ * x86_64 下内部会先确保目标有 endbr64（IBT 封存可能已把它换成 NOP），
+ * 否则间接调用会 #CP -> BUG at arch/x86/kernel/cet.c:132。*/
+#if defined(__x86_64__)
+long ksu_call_syscall(int nr, const struct pt_regs *regs);
+#else
+#define ksu_call_syscall(nr, regs) (ksu_syscall_table[nr](regs))
+#endif
+
 // Dispatcher slot number in syscall table
 extern int ksu_dispatcher_nr;
 

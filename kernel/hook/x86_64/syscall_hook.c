@@ -12,12 +12,24 @@
 #include <linux/fs.h>
 #include <linux/mutex.h>
 #include <linux/kmsg_dump.h>
+#include <asm/unistd.h>
 #include <asm/cacheflush.h>
+#include "manager/manager_identity.h"
+#include "supercall/supercall.h"
 #include "infra/symbol_resolver.h"
 #include "../patch_memory.h"
 #include "arch.h"
 #include "klog.h"
 extern void ksu_blog(const char *fmt, ...);
+#include "shim/ksu_shim.h"   /* [KSU-X86-PORT] ksu_ibt_ensure_endbr */
+
+/* [KSU-X86-PORT] 统一入口：先修 ENDBR，再间接调用。 */
+long ksu_call_syscall(int nr, const struct pt_regs *regs)
+{
+    sys_call_ptr_t fn = READ_ONCE(ksu_syscall_table[nr]);
+    ksu_ibt_ensure_endbr((void *)fn);
+    return fn(regs);
+}
 
 /* ============================================================================
  * [KSU-X86-PORT] 本文件的非上游改动清单（H3C MegaBook / MegaOS / 6.12.30）
@@ -369,6 +381,24 @@ static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
         ksu_sysno_idx++; ksu_sysno_total++;
         return ksu_syscall_dispatcher(regs);
     }
+    /* [KSU-X86-PORT] 管理器驱动 fd 的注入：
+     * 上游由 syscall_hook_manager 在 execve 后注入 fd；我们跳过了 hook manager，
+     * 因此在这里（execve 成功返回时）自己装一次。没有 fd 时管理器的 C++ ksuctl()
+     * 只会扫描 /proc/self/fd，扫不到就直接返回 EBADF ⇒ 界面显示"未安装"。
+     * 只对管理器 uid 生效；fd 带 O_CLOEXEC，下次 exec 会自动关闭并重新注入。 */
+    if (nr == __NR_execve || nr == __NR_execveat) {
+        long ret;
+
+        if (!ksu_tramp)
+            return -ENOSYS;
+        ret = ((long (*)(const struct pt_regs *, unsigned int))ksu_tramp)(regs, nr);
+        if (ret == 0 && is_manager()) {
+            int fd = ksu_install_fd();
+            ksu_blog("SUPER: manager fd=%d pid=%d (after execve)\n", fd, current->pid);
+        }
+        return ret;
+    }
+
     /* [KSU-X86-PORT] 其余调用：走原地蹦床（回放被覆盖的 12 字节后跳回
      * x64_sys_call+12），由内核自己的 switch 完成派发。
      * 上游/KSU-Next 在这里用 ksu_syscall_table[nr](regs) 自行派发；
