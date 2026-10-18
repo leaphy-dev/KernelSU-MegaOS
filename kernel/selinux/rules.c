@@ -50,7 +50,7 @@ void apply_kernelsu_rules()
     struct policydb *db;
 
     if (!ksu_shim_resolved("selinux_state")) {
-        pr_warn("kernelsu: shim 未就绪(selinux_state)，跳过 sepolicy 规则\n");
+        pr_warn("kernelsu: shim not ready (selinux_state), skip sepolicy rules\n");
         return;
     }
 

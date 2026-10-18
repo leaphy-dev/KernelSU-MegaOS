@@ -113,7 +113,7 @@ static void ksu_ibt_ensure_endbr(void *addr)
 	if (memcmp(addr, endbr, 4) == 0)
 		return;
 	if (memcmp(addr, sealed, 4) != 0) {
-		pr_warn_once("ksu-shim: %px 开头不是已知 ENDBR 形态，跳过修复\n", addr);
+		pr_warn_once("ksu-shim: %px: unknown entry form (no ENDBR), skip IBT fix\n", addr);
 		return;
 	}
 	ret = ksu_patch_text(addr, endbr, 4, KSU_PATCH_TEXT_FLUSH_ICACHE);
@@ -128,7 +128,7 @@ static void ksu_ibt_ensure_endbr(void *addr)
 			fn = (ret(*) proto)                                  \
 				ksu_resolve_symbol_for_functable_hook(#name);\
 			if (unlikely(!fn)) {                                 \
-				pr_warn_once("ksu-shim: 未能解析 %s\n", #name);\
+				pr_warn_once("ksu-shim: failed to resolve %s\n", #name);\
 				return notfound;                             \
 			}                                                    \
 			ksu_ibt_ensure_endbr((void *)fn);                    \
@@ -144,7 +144,7 @@ static void ksu_ibt_ensure_endbr(void *addr)
 			fn = (void (*)proto)         \
 				ksu_resolve_symbol_for_functable_hook(#name);\
 			if (unlikely(!fn)) {         \
-				pr_warn_once("ksu-shim: 未能解析 %s\n", #name);\
+				pr_warn_once("ksu-shim: failed to resolve %s\n", #name);\
 				return;              \
 			}                            \
 			ksu_ibt_ensure_endbr((void *)fn);\
@@ -577,7 +577,7 @@ static long ksu_kaslr_slide(void)
 		slide = (s >= 0 && s <= 0x40000000L && (s % 0x200000L) == 0) ? s : -1;
 		done = true;
 		if (slide < 0)
-			pr_warn("ksu-shim: slide 不可信(%ld)，走扫描兜底\n", slide);
+			pr_warn("ksu-shim: untrusted slide (%ld), falling back to scan\n", slide);
 	}
 	return slide;
 }
@@ -712,13 +712,13 @@ unsigned long ksu_shim_data_addr(const char *name)
 				addr = ksu_data_resolvers[i].resolve();
 			ksu_data_resolvers[i].cached = addr;
 			if (addr)
-				pr_info("ksu-shim: 数据符号 %s 解析成功 @%lx\n", name, addr);
+				pr_info("ksu-shim: data symbol %s resolved @%lx\n", name, addr);
 			else
-				pr_warn("ksu-shim: 数据符号 %s 解析失败（使用哑对象）\n", name);
+				pr_warn("ksu-shim: data symbol %s not found (using dummy)\n", name);
 		}
 		return ksu_data_resolvers[i].cached;
 	}
-	pr_warn_once("ksu-shim: 未知数据符号 %s\n", name);
+	pr_warn_once("ksu-shim: unknown data symbol %s\n", name);
 	return 0;
 }
 
@@ -740,7 +740,7 @@ static void ksu_shim_post_init(void)
 	real = ksu_shim_data_addr("selinux_blob_sizes");
 	if (real && (void *)real != (void *)&selinux_blob_sizes) {
 		memcpy(&selinux_blob_sizes, (const void *)real, sizeof(selinux_blob_sizes));
-		pr_info("ksu-shim: selinux_blob_sizes 已拷入 (lbs_cred=%d lbs_task=%d)\n",
+		pr_info("ksu-shim: selinux_blob_sizes copied (lbs_cred=%d lbs_task=%d)\n",
 			selinux_blob_sizes.lbs_cred, selinux_blob_sizes.lbs_task);
 	}
 }
