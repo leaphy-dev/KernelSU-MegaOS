@@ -5,6 +5,7 @@
 #include <asm/syscall.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 #include <trace/events/syscalls.h>
 
 #include <linux/version.h>
@@ -94,34 +95,61 @@ static struct kretprobe *syscall_unregfunc_rp = NULL;
 #endif
 
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+/* [KSU-X86-PORT][DIAG] tracepoint -> dispatcher -> hook 链路计数（临时） */
+unsigned long ksu_tp_calls, ksu_tp_compat, ksu_tp_nohook, ksu_tp_redir;
+unsigned long ksu_disp_calls, ksu_disp_bad;
+unsigned long ksu_hook_setresuid_calls;
+
+static void ksu_tp_diag_fn(struct work_struct *w);
+static DECLARE_DELAYED_WORK(ksu_tp_diag_work, ksu_tp_diag_fn);
+static int ksu_tp_diag_left = 20;
+
+static void ksu_tp_diag_fn(struct work_struct *w)
+{
+    ksu_blog("TPDIAG calls=%lu compat=%lu nohook=%lu redir=%lu disp=%lu bad=%lu hook=%lu\n",
+             ksu_tp_calls, ksu_tp_compat, ksu_tp_nohook, ksu_tp_redir,
+             ksu_disp_calls, ksu_disp_bad, ksu_hook_setresuid_calls);
+    if (--ksu_tp_diag_left > 0)
+        schedule_delayed_work(&ksu_tp_diag_work, msecs_to_jiffies(15000));
+}
+
 // sys_enter handler: redirect hooked syscalls to the dispatcher
 static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 {
+    ksu_tp_calls++;
+
 #if defined(__x86_64__)
-    if (unlikely(in_compat_syscall()))
+    if (unlikely(in_compat_syscall())) {
+        ksu_tp_compat++;
 #elif defined(__aarch64__) || defined(__riscv)
-    if (unlikely(is_compat_task()))
+    if (unlikely(is_compat_task())) {
+        ksu_tp_compat++;
 #endif
         return;
+    }
 
     if (ksu_dispatcher_nr < 0)
         return;
 
     if (ksu_has_syscall_hook(id)) {
-        struct pt_regs *current_regs = task_pt_regs(current);
-
+        ksu_tp_redir++;
 #if defined(__x86_64__)
-        // Stash the original syscall number in ax.
-        // We use ax because it currently just holds -ENOSYS and is safe to overwrite.
-        current_regs->ax = id;
-        current_regs->orig_ax = ksu_dispatcher_nr;
+        /* [KSU-X86-PORT] 直接用 tracepoint 传入的 regs。
+         * FRED（CONFIG_X86_FRED=y）下 task_pt_regs(current) 不一定等于
+         * 入口实际使用/回读的那份 pt_regs；用 regs 才能保证改写生效。 */
+        regs->ax = id;
+        regs->orig_ax = ksu_dispatcher_nr;
 #elif defined(__aarch64__)
+        struct pt_regs *current_regs = task_pt_regs(current);
         PT_REGS_ORIG_SYSCALL(current_regs) = id;
         current_regs->syscallno = ksu_dispatcher_nr;
 #elif defined(__riscv)
+        struct pt_regs *current_regs = task_pt_regs(current);
         /* orig_a0 retains argument zero; a0 is the -ENOSYS return slot. */
         ksu_riscv_redirect_syscall(current_regs, id, ksu_dispatcher_nr);
 #endif
+    } else {
+        ksu_tp_nohook++;
     }
 }
 #endif
@@ -162,6 +190,12 @@ void  ksu_syscall_hook_manager_init(void)
 
     ksu_setuid_hook_init();
     ksu_sucompat_init();
+
+#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+    /* [KSU-X86-PORT][DIAG] 15s 后开始周期性输出链路计数，共 8 次 */
+    INIT_DELAYED_WORK(&ksu_tp_diag_work, ksu_tp_diag_fn);
+    schedule_delayed_work(&ksu_tp_diag_work, msecs_to_jiffies(15000));
+#endif
 }
 
 void __exit ksu_syscall_hook_manager_exit(void)

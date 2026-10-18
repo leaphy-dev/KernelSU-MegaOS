@@ -23,6 +23,8 @@
 extern void ksu_blog(const char *fmt, ...);
 #include "shim/ksu_shim.h"   /* [KSU-X86-PORT] ksu_ibt_ensure_endbr */
 
+extern unsigned long ksu_disp_calls, ksu_disp_bad;   /* [KSU-X86-PORT][DIAG] */
+
 /* [KSU-X86-PORT] 统一入口：先修 ENDBR，再间接调用。 */
 long ksu_call_syscall(int nr, const struct pt_regs *regs)
 {
@@ -199,8 +201,11 @@ static int ksu_find_ni_syscall_slots(int *out_slots, int max_slots)
 // otherwise it's a spurious call — return -ENOSYS.
 static long __nocfi ksu_syscall_dispatcher(const struct pt_regs *regs)
 {
-    if (regs->orig_ax != ksu_dispatcher_nr)
+    ksu_disp_calls++;
+    if (regs->orig_ax != ksu_dispatcher_nr) {
+        ksu_disp_bad++;
         return -ENOSYS;
+    }
 
     // On x86_64, orig_ax was overwritten by our tracepoint to route here.
     // The original syscall number passed by userspace is still sitting untouched in ax.

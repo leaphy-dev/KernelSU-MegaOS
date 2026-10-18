@@ -20,6 +20,7 @@
 #include "feature/adb_root.h"
 
 extern void ksu_blog(const char *fmt, ...);   /* [KSU-X86-PORT][DIAG] */
+extern unsigned long ksu_hook_setresuid_calls; /* [KSU-X86-PORT][DIAG] */
 
 static int ksu_handle_init_mark_tracker(const char __user **filename_user)
 {
@@ -128,6 +129,7 @@ long __nocfi ksu_hook_setresuid(int orig_nr, const struct pt_regs *regs)
     uid_t old_uid = current_uid().val;
 
     /* [KSU-X86-PORT][DIAG] 只记前 8 次，确认 tracepoint -> dispatcher -> hook 链路通 */
+    ksu_hook_setresuid_calls++;
     { static int n; if (n < 8) { n++; ksu_blog("hook: setresuid entered\n"); } }
 
     long ret = ksu_call_syscall(orig_nr, regs);
