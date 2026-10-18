@@ -44,10 +44,20 @@ static void reset_avc_cache()
     selinux_xfrm_notify_policyload();
 }
 
+static bool ksu_rules_applied;
+
+void ksu_reset_rules_applied(void)
+{
+    ksu_rules_applied = false;
+}
+
 void apply_kernelsu_rules()
 {
     struct selinux_policy *pol, *old_pol;
     struct policydb *db;
+
+    if (ksu_rules_applied)
+        return;
 
     if (!ksu_shim_resolved("selinux_state")) {
         pr_warn("kernelsu: shim not ready (selinux_state), skip sepolicy rules\n");
@@ -61,6 +71,10 @@ void apply_kernelsu_rules()
     mutex_lock(&selinux_state.policy_mutex);
 
     old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));
+    if (!old_pol || !old_pol->sidtab || old_pol->policydb.policyvers == 0) {
+        pr_err("kernelsu: invalid selinux policy, skip sepolicy rules\n");
+        goto out_unlock;
+    }
     backup_sepolicy = ksu_dup_sepolicy(old_pol);
     if (IS_ERR(backup_sepolicy)) {
         pr_err("failed to create backup sepolicy: %ld\n", PTR_ERR(backup_sepolicy));
@@ -168,6 +182,8 @@ void apply_kernelsu_rules()
     ksu_destroy_sepolicy(old_pol);
 
     reset_avc_cache();
+    ksu_rules_applied = true;
+    pr_info("kernelsu: sepolicy rules applied successfully\n");
 out_unlock:
     mutex_unlock(&selinux_state.policy_mutex);
 }

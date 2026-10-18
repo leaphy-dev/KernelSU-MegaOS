@@ -20,30 +20,58 @@
  * ========================================================================== */
 #include "klog.h"
 
+/* [KSU-X86-PORT] 避免在 core/init.c 里包含 shim 头（包含顺序会与 mm_types 冲突） */
+void ksu_shim_ensure_all_endbr(void);
+void ksu_panic_dumper_early_init(void);
+void ksu_shim_data_retry(const char *name);
+
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/uaccess.h>
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/timekeeping.h>
+#include <linux/delay.h>
+#include <linux/jiffies.h>
 
 #ifdef KSU_X86_PERSISTENT_BOOT_LOG
 /* persistent 分区（1MB）：日志从 512KB 起顺序追加；
  * 静态变量每次开机归零 ⇒ 每次开机从头重写。 */
+static struct file *ksu_blog_f;
 static loff_t ksu_blog_persist_off;
+
+/* [KSU-X86-PORT] 只在开机早期打开一次并长期持有 fd。
+ * 之前每次 ksu_blog 都 filp_open，等 SELinux policy 生效后就打不开了；
+ * 而 panic dumper 的 fd 是早期打开的，所以只有它能写进去。 */
+static struct file *ksu_persistent_open_retry(void)
+{
+	struct file *f;
+	int i;
+
+	for (i = 0; i < 50; i++) {
+		f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
+		if (!IS_ERR(f))
+			return f;
+		msleep(100);
+	}
+	return NULL;
+}
+
+void ksu_blog_early_init(void)
+{
+	if (!ksu_blog_f)
+		ksu_blog_f = ksu_persistent_open_retry();
+}
 
 static void ksu_blog_to_persist(const char *buf, int n)
 {
-	struct file *f = filp_open("/dev/block/by-name/persistent", O_WRONLY | O_SYNC, 0);
-
-	if (IS_ERR(f))
+	if (!ksu_blog_f)
 		return;
 	if (ksu_blog_persist_off == 0)
 		ksu_blog_persist_off = 512 * 1024;
-	f->f_pos = ksu_blog_persist_off;
-	if (kernel_write(f, buf, n, &f->f_pos) == n)
+	ksu_blog_f->f_pos = ksu_blog_persist_off;
+	if (kernel_write(ksu_blog_f, buf, n, &ksu_blog_f->f_pos) == n)
 		ksu_blog_persist_off += n;
-	filp_close(f, NULL);
 }
 
 void ksu_blog(const char *fmt, ...)
@@ -69,6 +97,10 @@ void ksu_blog(const char *fmt, ...)
 		n = sizeof(buf) - 1;
 
 	ksu_blog_to_persist(buf, n);
+}
+#else
+void ksu_blog_early_init(void)
+{
 }
 #endif /* KSU_X86_PERSISTENT_BOOT_LOG */
 
@@ -169,6 +201,53 @@ bool ksu_bundled = false;
 module_param_named(bundled, ksu_bundled, bool, 0);
 #endif
 
+/* [KSU-X86-PORT] 事件驱动，不做定时轮询，也不挂 kretprobe：
+ *   - module_init 末尾先 schedule 一次（晚加载时 policy 已就绪）；
+ *   - 第一次 setresuid（zygote/manager）和 sucompat 命中时 kick；
+ *   - 这两个事件都发生在 policy 加载之后，work 里再解析 selinux_state。
+ * 没有 return trampoline，不会因为 BOLT/LTO 的函数拆分炸返回地址。 */
+static struct work_struct ksu_sepolicy_work;
+
+static void ksu_sepolicy_work_fn(struct work_struct *w)
+{
+    (void)w;
+
+    ksu_shim_data_retry("selinux_state");
+    cache_sid();
+
+    if (ksu_su_domain_ready()) {
+        setup_ksu_cred();
+        pr_info("kernelsu: sepolicy event: su domain already ready\n");
+        ksu_blog("sepolicy event: ready\n");
+        return;
+    }
+
+    ksu_reset_rules_applied();
+    apply_kernelsu_rules();
+    cache_sid();
+
+    if (ksu_su_domain_ready()) {
+        setup_ksu_cred();
+        pr_info("kernelsu: sepolicy event: rules applied\n");
+        ksu_blog("sepolicy event: applied\n");
+    } else {
+        pr_err("kernelsu: sepolicy event: apply failed\n");
+        ksu_blog("sepolicy event: failed\n");
+    }
+}
+
+static void ksu_sepolicy_event_init(void)
+{
+    INIT_WORK(&ksu_sepolicy_work, ksu_sepolicy_work_fn);
+}
+
+void ksu_sepolicy_kick(void)
+{
+    if (ksu_su_domain_ready())
+        return;
+    schedule_work(&ksu_sepolicy_work);
+}
+
 
 int  kernelsu_init(void)
 {
@@ -195,6 +274,14 @@ int  kernelsu_init(void)
     ksu_late_loaded = false;
 #endif
 
+    /* [KSU-X86-PORT] 先初始化 policy 事件 work，再继续 init。 */
+    ksu_sepolicy_event_init();
+
+    /* [KSU-X86-PORT] 先拿到 persistent fd，再装 hook / 做慢速 ENDBR 补丁。
+     * 这两个 fd 必须在 SELinux policy 生效前打开，否则后续写日志会被拦。 */
+    ksu_blog_early_init();
+    ksu_panic_dumper_early_init();
+
 #ifdef CONFIG_KSU_DEBUG
     pr_alert("*************************************************************");
     pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
@@ -216,6 +303,10 @@ int  kernelsu_init(void)
 
     ksu_init_symbol_resolver();
     ksu_syscall_hook_init();
+
+    /* [KSU-X86-PORT] 在 IRQ 开启的 init 阶段补好所有 shim 目标的 ENDBR。
+     * 不能等第一次调用（change_pid 会在 tasklist_lock 下被调用）。 */
+    ksu_shim_ensure_all_endbr();
 
     // Block modules early, before vendor modules are loaded in second stage.
     ksu_module_blacklist_init();
@@ -279,11 +370,14 @@ int  kernelsu_init(void)
     kobject_del(&THIS_MODULE->mkobj.kobj);
 #endif
 #endif
+
     return 0;
 }
 
 void __exit kernelsu_exit(void)
 {
+    cancel_work_sync(&ksu_sepolicy_work);
+
     // Phase 1: Stop all hooks first to prevent new callbacks
     ksu_syscall_hook_manager_exit();
 

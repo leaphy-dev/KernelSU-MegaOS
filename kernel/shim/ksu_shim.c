@@ -112,6 +112,14 @@ void ksu_ibt_ensure_endbr(void *addr)
 		return;
 	if (memcmp(addr, endbr, 4) == 0)
 		return;
+
+	/* [KSU-X86-PORT] set_memory_rw() 内部有 BUG_ON(irqs_disabled())。
+	 * 有些 shim 函数（如 change_pid）会在 tasklist_lock 下被调用，
+	 * 此时不能改页属性；所有已知函数已在 init 阶段补好 ENDBR。 */
+	if (irqs_disabled()) {
+		pr_warn_once("ksu-shim: ENDBR patch skipped in atomic context: %px\n", addr);
+		return;
+	}
 	if (memcmp(addr, sealed, 4) != 0) {
 		pr_warn_once("ksu-shim: %px: unknown entry form (no ENDBR), skip IBT fix\n", addr);
 		return;
@@ -372,9 +380,14 @@ static bool ksu_valid_selinux_state(unsigned long cand)
 		return false;
 	if (ksu_safe_read(&s, (const void *)cand, sizeof(s)) < 0)
 		return false;
+	pr_info("ksu-shim: selinux_state cand=%lx init=%d enf=%d policy=%lx\n",
+		cand, s.initialized, s.enforcing, (unsigned long)s.policy);
 	if (s.initialized != true || s.enforcing > 1)
 		return false;
-	return ksu_is_kptr((unsigned long)s.policy);
+	/* policy 是 kmalloc 出来的 direct-map 堆指针（如 ffff9ac4...），
+	 * 不是内核镜像区指针；这里只要求它是 canonical 高地址。
+	 * 不做解引用，避免在 policy_mutex 外与 policy reload 竞争。 */
+	return (unsigned long)s.policy >= 0xffff800000000000UL;
 }
 
 static bool ksu_valid_blob_sizes(unsigned long cand)
@@ -550,11 +563,11 @@ static unsigned long ksu_resolve_tracepoint_sys_enter(void)
  *             mntns_operations     ← 3/3 函数 + 回调指针落在 +0x18..+0x30
  *             __tracepoint_sys_enter ← __traceiter_sys_enter 引用 + .name=="sys_enter"
  *
- * slide = 本模块【已导入】的 _printk 运行时地址 − 它在设备 vmlinux 的链接期地址
+ * slide = 运行时 _stext 地址 − 设备 vmlinux 的链接期 _stext 地址
  * （KASLR 平移整个内核镜像，text/data 同幅 ⇒ 该公式对数据符号同样成立）
  * 任何一步校验不过 → 返回 0 → 自动退回原来的扫描器（安全）。
  * ================================================================== */
-#define KSU_LINK__printk                 0xffffffff81000650UL
+#define KSU_LINK__stext                  0xffffffff81000000UL
 #define KSU_LINK_init_mm                 0xffffffff8538b380UL
 #define KSU_LINK_selinux_state           0xffffffff85fd6fc8UL
 #define KSU_LINK_selinux_blob_sizes      0xffffffff84f8ec40UL
@@ -568,16 +581,37 @@ static unsigned long ksu_exact_addr(const char *name, long slide);
 static long ksu_kaslr_slide(void)
 {
 	static bool done;
+	static bool in_slide;
 	static long slide;
+	unsigned long st;
 
-	if (!done) {
-		long s = (long)((unsigned long)(void *)&_printk - KSU_LINK__printk);
+	if (done)
+		return slide;
 
-		/* 合理性检查：KASLR 以 2MB 为粒度、只向上平移 */
-		slide = (s >= 0 && s <= 0x40000000L && (s % 0x200000L) == 0) ? s : -1;
-		done = true;
-		if (slide < 0)
-			pr_warn("ksu-shim: untrusted slide (%ld), falling back to scan\n", slide);
+	/* 关键：不能走 find_kernel_symbol_exact("_stext")。
+	 * find_kernel_symbol_exact 会先调用 ksu_shim_exact_lookup，
+	 * 后者又调用 ksu_exact_addr -> ksu_kaslr_slide，形成无限递归。
+	 * 这里直接调用内核导出的 kallsyms_lookup_name。 */
+	if (in_slide)
+		return -1;
+	in_slide = true;
+	st = kallsyms_lookup_name("_stext");
+	in_slide = false;
+
+	if (!st)
+		return -1;
+
+	{
+		long s = (long)(st - KSU_LINK__stext);
+
+		if (s >= 0 && s <= 0x40000000L && (s % 0x200000L) == 0) {
+			slide = s;
+			done = true;
+			pr_info("ksu-shim: KASLR slide %ld via _stext=%lx\n", slide, st);
+		} else {
+			pr_warn("ksu-shim: untrusted _stext slide %ld (st=%lx), retry later\n", s, st);
+			return -1;
+		}
 	}
 	return slide;
 }
@@ -695,6 +729,11 @@ static struct {
 	{ "__tracepoint_sys_enter", ksu_resolve_tracepoint_sys_enter,  0, false },
 };
 
+/* [KSU-X86-PORT] 解析失败只缓存到下一次显式 retry。
+ * 模块可能在 SELinux policy 加载前就第一次访问 selinux_state，
+ * 此时 policy == NULL，valid() 失败是正常的；policy 加载完成的
+ * kretprobe 会调用 ksu_shim_data_retry() 清掉 done，再解析一次。
+ * 不做基于时间的轮询。 */
 unsigned long ksu_shim_data_addr(const char *name)
 {
 	unsigned long addr;
@@ -714,12 +753,27 @@ unsigned long ksu_shim_data_addr(const char *name)
 			if (addr)
 				pr_info("ksu-shim: data symbol %s resolved @%lx\n", name, addr);
 			else
-				pr_warn("ksu-shim: data symbol %s not found (using dummy)\n", name);
+				pr_warn("ksu-shim: data symbol %s not found (dummy)\n", name);
 		}
 		return ksu_data_resolvers[i].cached;
 	}
 	pr_warn_once("ksu-shim: unknown data symbol %s\n", name);
 	return 0;
+}
+
+/* [KSU-X86-PORT] policy 加载完成事件专用：清掉失败状态，允许立即再解析一次。 */
+void ksu_shim_data_retry(const char *name)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ksu_data_resolvers); i++) {
+		if (strcmp(ksu_data_resolvers[i].name, name) != 0)
+			continue;
+		if (ksu_data_resolvers[i].cached)
+			return;
+		ksu_data_resolvers[i].done = false;
+		return;
+	}
 }
 
 bool ksu_shim_resolved(const char *name)
@@ -805,3 +859,76 @@ static const u32 ksu_version_ext_crcs[] __used
 	__section("__version_ext_crcs") = { 0x5eed5eedu };
 static const char ksu_version_ext_names[] __used
 	__section("__version_ext_names") = "ksu_shim_placeholder_never_matches";
+
+
+/* [KSU-X86-PORT] 所有 shim 间接调用目标的 ENDBR 必须在 init（IRQ 开启）阶段补好。
+ * change_pid 会在 tasklist_lock（IRQ 关闭）下被调用，懒补丁会触发
+ * set_memory_rw 的 BUG_ON(irqs_disabled()) —— 实测 kernel BUG at
+ * arch/x86/mm/pat/set_memory.c:405，随后 panic。 */
+static const char * const ksu_shim_endbr_names[] = {
+	"alloc_uid",
+	"change_pid",
+	"current_is_single_threaded",
+	"copy_to_kernel_nofault",
+	"strncpy_from_user_nofault",
+	"native_set_fixmap",
+	"ksys_unshare",
+	"set_cred_ucounts",
+	"set_fs_pwd",
+	"seccomp_filter_release",
+	"ns_get_path",
+	"path_mount",
+	"path_umount",
+	"ext4_unregister_sysfs",
+	"__x64_sys_close",
+	"__x64_sys_setns",
+	"avc_has_perm",
+	"avc_ss_reset",
+	"avtab_alloc",
+	"avtab_destroy",
+	"avtab_insert_nonunique",
+	"avtab_search_node",
+	"avtab_search_node_next",
+	"cond_compute_av",
+	"ebitmap_cmp",
+	"ebitmap_contains",
+	"ebitmap_destroy",
+	"ebitmap_get_bit",
+	"ebitmap_set_bit",
+	"__hashtab_insert",
+	"mls_compute_context_len",
+	"mls_context_to_sid",
+	"mls_sid_to_context",
+	"policydb_context_isvalid",
+	"policydb_destroy",
+	"policydb_filenametr_search",
+	"policydb_load_isids",
+	"policydb_read",
+	"policydb_write",
+	"security_bounded_transition",
+	"selinux_status_update_policyload",
+	"selnl_notify_policyload",
+	"sidtab_context_to_sid",
+	"sidtab_destroy",
+	"sidtab_search_entry",
+	"sidtab_sid2str_get",
+	"sidtab_sid2str_put",
+	"symtab_insert",
+	"symtab_search",
+	NULL,
+};
+
+void ksu_shim_ensure_all_endbr(void)
+{
+	int i, n = 0;
+
+	for (i = 0; ksu_shim_endbr_names[i]; i++) {
+		unsigned long addr = ksu_resolve_symbol_for_functable_hook(ksu_shim_endbr_names[i]);
+
+		if (!addr)
+			continue;
+		ksu_ibt_ensure_endbr((void *)addr);
+		n++;
+	}
+	pr_info("ksu-shim: ENDBR init pass done (%d symbols)\n", n);
+}

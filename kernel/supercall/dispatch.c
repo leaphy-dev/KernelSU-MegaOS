@@ -32,6 +32,7 @@ static int do_grant_root(void __user *arg)
 
     pr_info("allow root for: %d\n", audit_uid);
     ret = escape_with_root_profile();
+    pr_info("grant_root: uid=%d euid=%d ret=%d\n", audit_uid, audit_euid, ret);
     ksu_sulog_emit_grant_root(ret, audit_uid, audit_euid, GFP_KERNEL);
 
     return ret;
@@ -878,12 +879,12 @@ long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void 
 #ifdef CONFIG_KSU_DEBUG
     pr_info("ksu ioctl: cmd=0x%x from uid=%d\n", cmd, current_uid().val);
 #endif
-    /* [KSU-X86-PORT][DIAG] 记录管理器实际调用的 ioctl 与返回值，
-     * 用于定位"内核已运行但管理器显示未安装"（GET_INFO 失败）。*/
+    /* [KSU-X86-PORT][DIAG] 记录管理器实际调用的 ioctl 与返回值 */
     {
         static int n_in;
-        if (n_in < 40) {
+        if (n_in < 80) {
             n_in++;
+            pr_info("ksu ioctl: cmd=0x%x uid=%d\n", cmd, current_uid().val);
         }
     }
 
@@ -900,8 +901,9 @@ long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void 
             ret = ksu_ioctl_handlers[i].handler(argp);
             {
                 static int n_out;
-                if (n_out < 40) {
+                if (n_out < 80) {
                     n_out++;
+                    pr_info("ksu ioctl: 0x%x -> %ld\n", cmd, ret);
                 }
             }
             return ret;

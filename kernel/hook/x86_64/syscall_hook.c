@@ -14,6 +14,7 @@
 #include <linux/fs.h>
 #include <linux/mutex.h>
 #include <linux/kmsg_dump.h>
+#include <linux/delay.h>
 #include <asm/unistd.h>
 #include <asm/cacheflush.h>
 #include "manager/manager_identity.h"
@@ -349,13 +350,56 @@ static void ksu_kd_retry_fn(struct work_struct *w)
         schedule_delayed_work(&ksu_kd_retry_work, HZ);
 }
 
+/* [KSU-X86-PORT][DIAG] 定期把 dmesg 尾部快照到 persistent@832KB。
+ * 这样即使没有 panic、persistent 主日志又为空，也能拿到 pr_info 诊断信息。 */
+static struct delayed_work ksu_dmesg_snap_work;
+static int ksu_dmesg_snaps_left = 6;
+
+static void ksu_dmesg_snap_fn(struct work_struct *w)
+{
+    struct kmsg_dump_iter iter;
+    size_t len = 0;
+
+    if (ksu_panic_f && ksu_panic_buf) {
+        kmsg_dump_rewind(&iter);
+        if (kmsg_dump_get_buffer(&iter, true, ksu_panic_buf, 65536, &len) && len) {
+            ksu_panic_f->f_pos = 832 * 1024;
+            kernel_write(ksu_panic_f, ksu_panic_buf, len, &ksu_panic_f->f_pos);
+        }
+    }
+    if (--ksu_dmesg_snaps_left > 0)
+        schedule_delayed_work(&ksu_dmesg_snap_work, 20 * HZ);
+}
+
 static void ksu_schedule_panic_dumper(void)
 {
     INIT_DELAYED_WORK(&ksu_kd_retry_work, ksu_kd_retry_fn);
     schedule_delayed_work(&ksu_kd_retry_work, HZ);
+
+    INIT_DELAYED_WORK(&ksu_dmesg_snap_work, ksu_dmesg_snap_fn);
+    schedule_delayed_work(&ksu_dmesg_snap_work, 20 * HZ);
+}
+
+/* [KSU-X86-PORT][DIAG] 在 module_init 线程里同步打开 persistent fd，
+ * 避免 workqueue 被后续 ENDBR/set_memory 慢路径拖到 SELinux policy 生效之后。 */
+void ksu_panic_dumper_early_init(void)
+{
+    int i;
+
+    if (ksu_panic_f)
+        return;
+    for (i = 0; i < 50; i++) {
+        if (ksu_panic_dumper_try() == 0)
+            return;
+        msleep(100);
+    }
 }
 #else
 static void ksu_schedule_panic_dumper(void)
+{
+}
+
+void ksu_panic_dumper_early_init(void)
 {
 }
 #endif

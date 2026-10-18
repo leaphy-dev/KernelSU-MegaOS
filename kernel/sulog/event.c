@@ -210,6 +210,14 @@ static struct ksu_sulog_pending_event *ksu_sulog_capture(__u16 event_type, const
     if (!ksu_sulog_is_enabled())
         return NULL;
 
+    {
+        static int n;
+        if (n < 40) {
+            n++;
+            pr_info("sulog: capture type=%u uid=%d\n", event_type, current_uid().val);
+        }
+    }
+
     pending = kzalloc(sizeof(*pending), gfp);
     if (!pending)
         goto out_drop;

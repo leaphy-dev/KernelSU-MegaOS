@@ -30,4 +30,7 @@ static inline int endswith(const char *s, const char *t)
     return strcmp(s + slen - tlen, t);
 }
 
+/* [KSU-X86-PORT] 第一次 su / manager setresuid 时触发 policy 事件检查 */
+void ksu_sepolicy_kick(void);
+
 #endif

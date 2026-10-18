@@ -12,7 +12,7 @@
 > running **MegaOS (Android 14, kernel 6.12.30)**. The stock vendor kernel is left
 > untouched. It is not affiliated with the KernelSU upstream project.
 >
-> Release / 版本 `megaos-6.12.30-r1` ·
+> Release / 版本 `megaos-6.12.30-r2` ·
 > module / 模块 `lkm-x86_64-megaos-android14-6.12_kernelsu.ko` ·
 > build / 构建 `kernel/build-megaos-x64.sh`
 
@@ -60,7 +60,7 @@ This branch is installed by flashing a pre-patched `boot_a` image from Windows.
   **Boot into Windows first.** The installer writes directly to `\\.\PhysicalDrive0`; it cannot run from Android, Linux, or WSL.
 - Windows 11 + **管理员** PowerShell。
   Windows 11 with an **Administrator** PowerShell.
-- 从 Release 下载 `boot_a_megaos-6.12.30-r1.img`、`install-megaos.ps1`、`SHA256SUMS`。
+- 从 Release 下载 `boot_a_megaos-6.12.30-r2.img`、`install-megaos.ps1`、`SHA256SUMS`。
   Download the three files from the release page.
 - 保留原厂 `boot_a` 备份（安装脚本的 `-Backup` 会自动备份）。
   Keep a stock `boot_a` backup (the installer's `-Backup` does this automatically).
@@ -76,7 +76,7 @@ This branch is installed by flashing a pre-patched `boot_a` image from Windows.
 
    ```powershell
    .\install-megaos.ps1 `
-       -Image .\boot_a_megaos-6.12.30-r1.img `
+       -Image .\boot_a_megaos-6.12.30-r2.img `
        -ExpectedSha256 884152fe86348ed80ae05421e02d5de6b834a76ade35be23f9144984a7a5eb1b `
        -Backup -SetOneShotBoot
    ```

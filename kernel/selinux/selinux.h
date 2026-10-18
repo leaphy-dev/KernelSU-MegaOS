@@ -34,6 +34,10 @@ bool is_adbd(const struct cred *cred);
 
 void apply_kernelsu_rules();
 
+void ksu_reset_rules_applied(void);
+
+bool ksu_su_domain_ready(void);
+
 int handle_sepolicy(void __user *user_data, u64 data_len);
 
 void setup_ksu_cred();

@@ -7,10 +7,12 @@
 #include <linux/tracepoint-defs.h>
 
 unsigned long ksu_shim_data_addr(const char *name);
+void ksu_shim_data_retry(const char *name);
 unsigned long ksu_shim_exact_lookup(const char *name);   /* 仅查精确表，无日志 */
 
 /* [KSU-X86-PORT] IBT：间接调用内核函数前，把被封存的 endbr64 补回来 */
 void ksu_ibt_ensure_endbr(void *addr);
+void ksu_shim_ensure_all_endbr(void);
 void *ksu_shim_data_or_dummy(const char *name, void *dummy);
 bool ksu_shim_resolved(const char *name);
 

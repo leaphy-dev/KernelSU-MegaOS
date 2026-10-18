@@ -106,6 +106,7 @@ long ksu_handle_faccessat_sucompat(int orig_nr, struct pt_regs *regs)
 
     if (unlikely(!memcmp(path, su_path, sizeof(su_path)))) {
         old_cred = override_creds(ksu_cred);
+        pr_info("sucompat: faccessat uid=%d ksud=%d\n", current_uid().val, (int)is_ksud_exists());
         if (is_ksud_exists()) {
             pr_info("faccessat su->ksud!\n");
             orig_filename = *filename_user;
@@ -141,6 +142,7 @@ long ksu_handle_stat_sucompat(int orig_nr, struct pt_regs *regs)
 
     if (unlikely(!memcmp(path, su_path, sizeof(su_path)))) {
         old_cred = override_creds(ksu_cred);
+        pr_info("sucompat: newfstatat uid=%d ksud=%d\n", current_uid().val, (int)is_ksud_exists());
         if (is_ksud_exists()) {
             pr_info("newfstatat su->ksud!\n");
             orig_filename = *filename_user;
@@ -195,7 +197,10 @@ static long ksu_handle_execve_sucompat_common(const char __user **filename_user,
     if (likely(memcmp(path, su_path, sizeof(su_path))))
         goto do_orig_execve;
 
+    ksu_sepolicy_kick();
     pr_info("sys_execve su found\n");
+    pr_info("sucompat: uid=%d euid=%d ksud_exists=%d\n",
+            current_uid().val, current_euid().val, (int)is_ksud_exists());
 
     tmp_fd = get_unused_fd_flags(O_CLOEXEC);
     if (tmp_fd < 0) {
@@ -235,6 +240,7 @@ static long ksu_handle_execve_sucompat_common(const char __user **filename_user,
     ksu_sulog_emit_pending(pending_sucompat, ret, GFP_KERNEL);
 
     ret = ksu_call_syscall(__NR_execveat, regs);
+    pr_info("sucompat: execveat ret=%ld\n", ret);
     if (ret < 0) {
         ksu_close_fd(tmp_fd);
         PT_REGS_SYSCALL_PARM1(regs) = orig_regs[0];
@@ -246,6 +252,7 @@ static long ksu_handle_execve_sucompat_common(const char __user **filename_user,
         // Only grant the scoped driver capability after the selected root
         // profile has been applied successfully.
         su_fd = ksu_install_su_fd();
+        pr_info("sucompat: su_fd=%d\n", su_fd);
         if (su_fd < 0) {
             pr_warn("install su session fd failed: %d\n", su_fd);
         }

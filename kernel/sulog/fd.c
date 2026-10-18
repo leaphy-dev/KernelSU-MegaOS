@@ -16,7 +16,13 @@ static bool ksu_sulog_fd_active;
 
 static ssize_t ksu_sulog_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-    return ksu_event_queue_read(ksu_sulog_get_queue(), buf, count, file->f_flags);
+    ssize_t ret = ksu_event_queue_read(ksu_sulog_get_queue(), buf, count, file->f_flags);
+    static int n;
+    if (n < 20) {
+        n++;
+        pr_info("sulog: read count=%zu -> %zd\n", count, ret);
+    }
+    return ret;
 }
 
 static __poll_t ksu_sulog_poll(struct file *file, poll_table *wait)

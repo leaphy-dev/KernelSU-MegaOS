@@ -162,6 +162,11 @@ void cache_sid(void)
     }
 }
 
+bool ksu_su_domain_ready(void)
+{
+    return cached_su_sid != 0;
+}
+
 /*
  * Fast path: compare task's SID directly against cached value.
  * Falls back to string comparison if cache is not initialized.

@@ -12,7 +12,7 @@
 > 本分支是面向 **H3C MegaBook 14 / MegaOS（Android 14，内核 6.12.30）** 的非官方
 > x86_64 LKM 适配，**不修改厂商内核**，与 KernelSU 上游项目无隶属关系。
 >
-> Release / 版本 `megaos-6.12.30-r1` ·
+> Release / 版本 `megaos-6.12.30-r2` ·
 > module / 模块 `lkm-x86_64-megaos-android14-6.12_kernelsu.ko` ·
 > build / 构建 `kernel/build-megaos-x64.sh`
 
@@ -61,8 +61,8 @@ No kernel rebuild and no fastboot are required.
   **请先切换到 Windows 系统。** 安装脚本直接写 `\\.\PhysicalDrive0`，无法在 Android / Linux / WSL 中运行。
 - Windows 11 with an **Administrator** PowerShell.
   Windows 11 + **管理员** PowerShell。
-- Download `boot_a_megaos-6.12.30-r1.img`, `install-megaos.ps1`, and `SHA256SUMS` from the release page.
-  从 Release 下载 `boot_a_megaos-6.12.30-r1.img`、`install-megaos.ps1`、`SHA256SUMS`。
+- Download `boot_a_megaos-6.12.30-r2.img`, `install-megaos.ps1`, and `SHA256SUMS` from the release page.
+  从 Release 下载 `boot_a_megaos-6.12.30-r2.img`、`install-megaos.ps1`、`SHA256SUMS`。
 - Keep a stock `boot_a` backup (the installer's `-Backup` does this automatically).
   保留原厂 `boot_a` 备份（安装脚本的 `-Backup` 会自动备份）。
 
@@ -77,7 +77,7 @@ No kernel rebuild and no fastboot are required.
 
    ```powershell
    .\install-megaos.ps1 `
-       -Image .\boot_a_megaos-6.12.30-r1.img `
+       -Image .\boot_a_megaos-6.12.30-r2.img `
        -ExpectedSha256 884152fe86348ed80ae05421e02d5de6b834a76ade35be23f9144984a7a5eb1b `
        -Backup -SetOneShotBoot
    ```
