@@ -66,6 +66,11 @@ void ksu_blog(const char *fmt, ...)
 	ksu_blog_to_persist(buf, n);
 }
 
+/* ============================================================================
+ * [KSU-X86-PORT] 调试日志系统到此结束。
+ * 以下恢复为 KernelSU 上游代码（未改动）。
+ * ========================================================================== */
+
 #include <linux/export.h>
 #include <linux/fs.h>
 #include <linux/kobject.h>
