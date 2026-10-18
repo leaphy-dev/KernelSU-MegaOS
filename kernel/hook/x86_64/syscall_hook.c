@@ -552,10 +552,19 @@ void  __nocfi ksu_syscall_hook_init(void)
     ksu_blog("  hook: sub-step ni_slot=%d\n", ni_slot);
     ksu_dispatcher_nr = ni_slot;
     /* [KSU-X86-PORT] 上游原逻辑：把 dispatcher 挂到 ni_syscall 表项上。
-     * 6.9+ 的 x64_sys_call 是生成的 switch、不查 sys_call_table，实际生效的是
-     * 上面的 12 字节 abs jump；这里保留上游调用（行为与上游一致，便于回退），
-     * 不删除。 */
+     * 但 H3C MegaBook 14 上这条路径【必崩】，实测（hmenable6，2026-10-18）：
+     *   set_memory_rw(sys_call_table 所在 .rodata 页) 返回 0，
+     *   页面实际仍为只读 ⇒ memcpy 触发
+     *   #PF error_code(0x0003) supervisor write, CR2=sys_call_table+134*8
+     *   ⇒ Oops ⇒ Kernel panic。
+     * 而 6.9+ 的 x64_sys_call 是生成的 switch、不查 sys_call_table，
+     * 该表项 patch 本就不生效；真正的派发由上面的 12 字节 abs jump 完成。
+     * 故源码保留上游调用，仅在本设备构建时用 KSU_X86_SKIP_TABLE_HOOK 编译掉。 */
+#ifndef KSU_X86_SKIP_TABLE_HOOK
     ksu_syscall_table_hook(ksu_dispatcher_nr, (sys_call_ptr_t)ksu_syscall_dispatcher, NULL);
+#else
+    ksu_blog("  hook: table_hook skipped (rodata RO; abs jump covers x64_sys_call)\n");
+#endif
     ksu_blog("  hook: dispatcher installed at slot %d\n", ni_slot);
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
 }

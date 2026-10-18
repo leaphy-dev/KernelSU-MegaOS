@@ -40,7 +40,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-FLAGS="-DKSU_X86_SKIP_SYMBOL_RESOLVER_INIT -DKSU_X86_PATCH_VIA_SETMEMORY2"
+FLAGS="-DKSU_X86_SKIP_SYMBOL_RESOLVER_INIT -DKSU_X86_PATCH_VIA_SETMEMORY2 -DKSU_X86_SKIP_TABLE_HOOK"
 [ "$HOOKMGR" = 1 ] || FLAGS="$FLAGS -DKSU_X86_SKIP_HOOK_MANAGER"
 [ "$DIAG" = 1 ]    && FLAGS="$FLAGS -DKSU_X86_BLACKBOX"
 
@@ -70,6 +70,7 @@ echo "  remaining .o: $(find . -name '*.o' | wc -l)"
 echo
 echo "=== build ==="
 BUILD_LOG=$(mktemp)
+# dispatcher
 if ! make -C "$KDIR" M="$ODIR" src="$MDIR" modules \
         CONFIG_KSU=m CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y \
         KCFLAGS="$FLAGS" -j"$(nproc)" >"$BUILD_LOG" 2>&1; then
