@@ -18,7 +18,6 @@
 
 #include "arch.h"
 #include "klog.h"
-extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */ // IWYU pragma: keep
 #include "hook/syscall_hook_manager.h"
 #include "hook/tp_marker.h"
 #include "feature/sucompat.h"
@@ -99,58 +98,20 @@ static struct kretprobe *syscall_unregfunc_rp = NULL;
 #endif
 
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
-/* [KSU-X86-PORT][DIAG] tracepoint -> dispatcher -> hook 链路计数（临时） */
-unsigned long ksu_tp_calls, ksu_tp_compat, ksu_tp_nohook, ksu_tp_redir;
-unsigned long ksu_disp_calls, ksu_disp_bad;
-unsigned long ksu_hook_setresuid_calls;
-
-static void ksu_tp_diag_fn(struct work_struct *w);
-static DECLARE_DELAYED_WORK(ksu_tp_diag_work, ksu_tp_diag_fn);
-static int ksu_tp_diag_left = 20;
-
-extern struct tracepoint __tracepoint_sys_enter;
-
-static void ksu_tp_diag_fn(struct work_struct *w)
-{
-    struct task_struct *p, *t;
-    int tp_set = 0, tp_total = 0;
-
-    read_lock(&tasklist_lock);
-    for_each_process_thread(p, t) {
-        tp_total++;
-        if (test_task_syscall_work(t, SYSCALL_TRACEPOINT))
-            tp_set++;
-    }
-    read_unlock(&tasklist_lock);
-
-    ksu_blog("TPDIAG calls=%lu compat=%lu nohook=%lu redir=%lu disp=%lu bad=%lu hook=%lu key=%d tpset=%d/%d\n",
-             ksu_tp_calls, ksu_tp_compat, ksu_tp_nohook, ksu_tp_redir,
-             ksu_disp_calls, ksu_disp_bad, ksu_hook_setresuid_calls,
-             static_key_enabled(&__tracepoint_sys_enter.key), tp_set, tp_total);
-    if (--ksu_tp_diag_left > 0)
-        schedule_delayed_work(&ksu_tp_diag_work, msecs_to_jiffies(15000));
-}
-
 // sys_enter handler: redirect hooked syscalls to the dispatcher
 static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 {
-    ksu_tp_calls++;
-
 #if defined(__x86_64__)
-    if (unlikely(in_compat_syscall())) {
-        ksu_tp_compat++;
+    if (unlikely(in_compat_syscall()))
 #elif defined(__aarch64__) || defined(__riscv)
-    if (unlikely(is_compat_task())) {
-        ksu_tp_compat++;
+    if (unlikely(is_compat_task()))
 #endif
         return;
-    }
 
     if (ksu_dispatcher_nr < 0)
         return;
 
     if (ksu_has_syscall_hook(id)) {
-        ksu_tp_redir++;
 #if defined(__x86_64__)
         /* [KSU-X86-PORT] 直接用 tracepoint 传入的 regs。
          * FRED（CONFIG_X86_FRED=y）下 task_pt_regs(current) 不一定等于
@@ -166,8 +127,6 @@ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
         /* orig_a0 retains argument zero; a0 is the -ENOSYS return slot. */
         ksu_riscv_redirect_syscall(current_regs, id, ksu_dispatcher_nr);
 #endif
-    } else {
-        ksu_tp_nohook++;
     }
 }
 #endif
@@ -189,42 +148,19 @@ void  ksu_syscall_hook_manager_init(void)
     ksu_register_syscall_hook(__NR_newfstatat, ksu_hook_newfstatat);
     ksu_register_syscall_hook(__NR_faccessat, ksu_hook_faccessat);
 
-    ksu_blog("hook_manager: setresuid hooked=%d execve=%d\n",
-             ksu_has_syscall_hook(__NR_setresuid), ksu_has_syscall_hook(__NR_execve));
-
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
     ret = register_trace_prio_sys_enter(ksu_sys_enter_handler, NULL, INT_MIN);
 #ifndef CONFIG_KRETPROBES
     ksu_mark_running_process_locked();
 #endif
-    if (ret) {
+    if (ret)
         pr_err("hook_manager: failed to register sys_enter tracepoint: %d\n", ret);
-        ksu_blog("hook_manager: sys_enter tracepoint FAILED ret=%d\n", ret);
-    } else {
+    else
         pr_info("hook_manager: sys_enter tracepoint registered\n");
-        ksu_blog("hook_manager: sys_enter tracepoint registered\n");
-    }
-
-    /* [KSU-X86-PORT][DIAG] 兜底：确保所有任务都带 SYSCALL_TRACEPOINT 工作位。
-     * tracepoint 的 regfunc 只在 static key 首次启用时执行；若 key 已被别的
-     * tracer 提前启用，新任务之外的位可能不完整。这里幂等补一次。 */
-    {
-        struct task_struct *p, *t;
-        read_lock(&tasklist_lock);
-        for_each_process_thread(p, t)
-            set_task_syscall_work(t, SYSCALL_TRACEPOINT);
-        read_unlock(&tasklist_lock);
-    }
 #endif
 
     ksu_setuid_hook_init();
     ksu_sucompat_init();
-
-#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
-    /* [KSU-X86-PORT][DIAG] 15s 后开始周期性输出链路计数，共 8 次 */
-    INIT_DELAYED_WORK(&ksu_tp_diag_work, ksu_tp_diag_fn);
-    schedule_delayed_work(&ksu_tp_diag_work, msecs_to_jiffies(15000));
-#endif
 }
 
 void __exit ksu_syscall_hook_manager_exit(void)

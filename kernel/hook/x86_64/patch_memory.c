@@ -19,7 +19,6 @@
 #include <asm/page.h>
 #include <asm/fixmap.h>
 #include <asm/set_memory.h>
-extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */
 
 #include "shim/ksu_shim.h"
 
@@ -133,19 +132,13 @@ static int ksu_patch_text_nosync(void *dst, void *src, size_t len, int flags)
 	int npages = (int)((end - start) >> PAGE_SHIFT);
 	int ret;
 
-	ksu_blog("  patch: sub-step set_memory_rw begin start=%lx npages=%d len=%d\n", start, npages, (int)len);
 	ret = set_memory_rw(start, npages);
-	ksu_blog("  patch: sub-step set_memory_rw ret=%d\n", ret);
 	if (ret) {
 		pr_err("ksu-shim: set_memory_rw(0x%lx,%d) failed: %d\n", start, npages, ret);
 		return ret;
 	}
-	ksu_blog("  patch: sub-step memcpy begin\n");
 	memcpy(dst, src, len);
-	ksu_blog("  patch: sub-step memcpy done\n");
-	ksu_blog("  patch: sub-step set_memory_ro begin\n");
 	ret = set_memory_ro(start, npages);
-	ksu_blog("  patch: sub-step set_memory_ro ret=%d\n", ret);
 	if (ret)
 		pr_err("ksu-shim: set_memory_ro(0x%lx,%d) failed: %d\n", start, npages, ret);
 	return 0;
@@ -216,7 +209,6 @@ static int ksu_patch_text_cb(void *arg)
 
 int ksu_patch_text(void *dst, void *src, size_t len, int flags)
 {
-	ksu_blog("   patch_text: enter dst=%lx len=%d\n", (unsigned long)dst, (int)len);
 #ifdef KSU_X86_PATCH_VIA_SETMEMORY2
 	/* 关键：set_memory_rw() 会睡眠/加锁，【不能】在 stop_machine 回调里调用 ✗
 	 * 它自己就会正确处理各 CPU 的 TLB，所以整段放在外面最安全 ✓ */
@@ -226,15 +218,11 @@ int ksu_patch_text(void *dst, void *src, size_t len, int flags)
 	int ret;
 
 	ret = set_memory_rw(start, npages);
-	ksu_blog("   p2: enter dst=%lx len=%d npages=%d\n", (unsigned long)dst, (int)len, npages);
 	if (ret) {
-		ksu_blog("   p2: set_memory_rw FAILED ret=%d\n", ret);
 		pr_err("ksu-shim: set_memory_rw(0x%lx,%d) failed: %d\n", start, npages, ret);
 		return ret;
 	}
-	ksu_blog("   p2: set_memory_rw ok -> memcpy\n");
 	memcpy(dst, src, len);
-	ksu_blog("   p2: memcpy done -> set_memory_ro\n");
 	ret = set_memory_ro(start, npages);
 	if (ret)
 		pr_err("ksu-shim: set_memory_ro(0x%lx,%d) failed: %d\n", start, npages, ret);

@@ -21,20 +21,12 @@
 #include "hook/tp_marker.h"
 #include "feature/kernel_umount.h"
 
-extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */ // IWYU pragma: keep
-extern uid_t ksu_seen_manager_uid;            /* [KSU-X86-PORT][DIAG] */
 
 int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid)
 {
     // we rely on the fact that zygote always call setresuid(3) with same uids
 
     pr_info("handle_setresuid from %d to %d\n", old_uid, new_uid);
-
-    /* [KSU-X86-PORT][DIAG] 管理器进程启动时一定会经过 setresuid；
-     * 如果这里没有命中，说明钩子/uid 识别有问题，而不是 fd 注入的问题。 */
-    if (ksu_seen_manager_uid != KSU_INVALID_APPID &&
-        (new_uid % KSU_PER_USER_RANGE) == (ksu_seen_manager_uid % KSU_PER_USER_RANGE))
-        ksu_blog("setresuid hit manager uid=%d appid=%d\n", new_uid, ksu_get_manager_appid());
 
     if (unlikely(is_uid_manager(new_uid))) {
         spin_lock_irq(&current->sighand->siglock);
