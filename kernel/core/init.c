@@ -175,7 +175,6 @@ int  kernelsu_init(void)
     KSU_BAIL(1);
     pr_info("welcome to KernelSU version " __stringify(KERNEL_SU_VERSION) ", package name " KSU_PACKAGE_NAME "\n");
 #if defined(__x86_64__) && !defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)
-#ifndef KSU_X86_SKIP_INDIRECT_SAFE_CHECK
     // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set
     if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE)) {
         pr_alert("*************************************************************");
@@ -189,7 +188,6 @@ int  kernelsu_init(void)
         pr_alert("*************************************************************");
         return -ENOSYS;
     }
-#endif /* !KSU_X86_SKIP_INDIRECT_SAFE_CHECK */
 #endif
 
 #ifdef MODULE
