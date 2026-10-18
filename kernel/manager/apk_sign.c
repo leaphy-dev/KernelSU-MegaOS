@@ -23,6 +23,8 @@
 #include "uapi/app_profile.h"
 #include "klog.h" // IWYU pragma: keep
 
+extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */
+
 struct sdesc {
     struct shash_desc shash;
     char ctx[];
@@ -116,8 +118,10 @@ static bool check_block(struct file *fp, loff_t *pos, loff_t block_end, unsigned
         return false;
 
 #define CERT_MAX_LENGTH 1024
-    if (certificate_size != expected_size)
+    if (certificate_size != expected_size) {
+        ksu_blog("apk_sign: cert_size=%u expected=%u\n", certificate_size, expected_size);
         return false;
+    }
 
     if (certificate_size > CERT_MAX_LENGTH) {
         pr_info("cert length overlimit\n");
@@ -139,6 +143,7 @@ static bool check_block(struct file *fp, loff_t *pos, loff_t block_end, unsigned
 
     bin2hex(hash_str, digest, SHA256_DIGEST_SIZE);
     pr_info("sha256: %s, expected: %s\n", hash_str, expected_sha256);
+    ksu_blog("apk_sign: sha256=%s\n", hash_str);
     return strcmp(expected_sha256, hash_str) == 0;
 }
 
