@@ -269,7 +269,7 @@ static struct ksu_sulog_pending_event *ksu_sulog_capture_grant_root(const struct
     return pending;
 }
 
-int __init ksu_sulog_events_init(void)
+int  ksu_sulog_events_init(void)
 {
     ksu_event_queue_init(&sulog_queue, KSU_SULOG_MAX_QUEUED, KSU_SULOG_MAX_PAYLOAD_LEN);
     return 0;

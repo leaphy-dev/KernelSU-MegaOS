@@ -55,7 +55,7 @@ int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid)
     return 0;
 }
 
-void __init ksu_setuid_hook_init(void)
+void  ksu_setuid_hook_init(void)
 {
     ksu_kernel_umount_init();
 }

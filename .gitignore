@@ -11,3 +11,6 @@ modules.order
 *.order
 # 其他
 __pycache__/
+
+# 临时备份（统一交给 git 管理）
+*.bak-*

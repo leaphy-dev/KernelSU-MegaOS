@@ -18,6 +18,8 @@
 #include <asm/pgtable.h>
 #include <asm/page.h>
 #include <asm/fixmap.h>
+#include <asm/set_memory.h>
+extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */
 
 #include "shim/ksu_shim.h"
 
@@ -121,6 +123,34 @@ struct patch_text_info {
     int flags;
 };
 
+#ifdef KSU_X86_PATCH_VIA_SETMEMORY
+/* 用内核正规 API 改写只读内核内存：不需要 init_mm 页表、不需要 fixmap、
+ * 不需要自己算物理地址 —— 那三样正是原实现的风险来源。 */
+static int ksu_patch_text_nosync(void *dst, void *src, size_t len, int flags)
+{
+	unsigned long start = (unsigned long)dst & PAGE_MASK;
+	unsigned long end = ((unsigned long)dst + len + PAGE_SIZE - 1) & PAGE_MASK;
+	int npages = (int)((end - start) >> PAGE_SHIFT);
+	int ret;
+
+	ksu_blog("  patch: sub-step set_memory_rw begin start=%lx npages=%d len=%d\n", start, npages, (int)len);
+	ret = set_memory_rw(start, npages);
+	ksu_blog("  patch: sub-step set_memory_rw ret=%d\n", ret);
+	if (ret) {
+		pr_err("ksu-shim: set_memory_rw(0x%lx,%d) failed: %d\n", start, npages, ret);
+		return ret;
+	}
+	ksu_blog("  patch: sub-step memcpy begin\n");
+	memcpy(dst, src, len);
+	ksu_blog("  patch: sub-step memcpy done\n");
+	ksu_blog("  patch: sub-step set_memory_ro begin\n");
+	ret = set_memory_ro(start, npages);
+	ksu_blog("  patch: sub-step set_memory_ro ret=%d\n", ret);
+	if (ret)
+		pr_err("ksu-shim: set_memory_ro(0x%lx,%d) failed: %d\n", start, npages, ret);
+	return 0;
+}
+#else
 static int ksu_patch_text_nosync(void *dst, void *src, size_t len, int flags)
 {
     pr_debug("patch dst=0x%lx src=0x%lx len=%ld\n", (unsigned long)dst, (unsigned long)src, len);
@@ -159,6 +189,8 @@ err:
     return ret;
 }
 
+#endif
+
 static int ksu_patch_text_cb(void *arg)
 {
     struct patch_text_info *pp = arg;
@@ -184,15 +216,40 @@ static int ksu_patch_text_cb(void *arg)
 
 int ksu_patch_text(void *dst, void *src, size_t len, int flags)
 {
-    struct patch_text_info info = {
-        .dst = dst,
-        .src = src,
-        .len = len,
-        .cpu_count = ATOMIC_INIT(0),
-        .flags = flags,
-    };
+	ksu_blog("   patch_text: enter dst=%lx len=%d\n", (unsigned long)dst, (int)len);
+#ifdef KSU_X86_PATCH_VIA_SETMEMORY2
+	/* 关键：set_memory_rw() 会睡眠/加锁，【不能】在 stop_machine 回调里调用 ✗
+	 * 它自己就会正确处理各 CPU 的 TLB，所以整段放在外面最安全 ✓ */
+	unsigned long start = (unsigned long)dst & PAGE_MASK;
+	unsigned long end = ((unsigned long)dst + len + PAGE_SIZE - 1) & PAGE_MASK;
+	int npages = (int)((end - start) >> PAGE_SHIFT);
+	int ret;
 
-    return stop_machine(ksu_patch_text_cb, &info, cpu_online_mask);
+	ret = set_memory_rw(start, npages);
+	ksu_blog("   p2: enter dst=%lx len=%d npages=%d\n", (unsigned long)dst, (int)len, npages);
+	if (ret) {
+		ksu_blog("   p2: set_memory_rw FAILED ret=%d\n", ret);
+		pr_err("ksu-shim: set_memory_rw(0x%lx,%d) failed: %d\n", start, npages, ret);
+		return ret;
+	}
+	ksu_blog("   p2: set_memory_rw ok -> memcpy\n");
+	memcpy(dst, src, len);
+	ksu_blog("   p2: memcpy done -> set_memory_ro\n");
+	ret = set_memory_ro(start, npages);
+	if (ret)
+		pr_err("ksu-shim: set_memory_ro(0x%lx,%d) failed: %d\n", start, npages, ret);
+	return 0;
+#else
+	struct patch_text_info info = {
+		.dst = dst,
+		.src = src,
+		.len = len,
+		.cpu_count = ATOMIC_INIT(0),
+		.flags = flags,
+	};
+
+	return stop_machine(ksu_patch_text_cb, &info, cpu_online_mask);
+#endif
 }
 
 // TODO:

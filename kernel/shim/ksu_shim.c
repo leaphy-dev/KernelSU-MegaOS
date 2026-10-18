@@ -76,69 +76,18 @@ typedef int (*ksu_koes_t)(int (*fn)(void *, const char *, unsigned long), void *
 typedef const char *(*ksu_kl_t)(unsigned long, unsigned long *, unsigned long *, char **, char *);
 typedef int (*ksu_klso_t)(unsigned long, unsigned long *, unsigned long *);
 
-static unsigned long ksu_bootstrap(const char *name)
-{
-	struct kprobe kp;
-	unsigned long addr = 0;
-
-	memset(&kp, 0, sizeof(kp));
-	kp.symbol_name = name;
-	if (register_kprobe(&kp) == 0) {
-		addr = (unsigned long)kp.addr;
-		unregister_kprobe(&kp);
-	}
-	return addr;
-}
-
-unsigned long kallsyms_lookup_name(const char *name)
-{
-	static ksu_kln_t fn;
-
-	if (unlikely(!fn)) {
-		fn = (ksu_kln_t)ksu_bootstrap("kallsyms_lookup_name");
-		if (!fn) {
-			pr_err("ksu-shim: 引导 kallsyms_lookup_name 失败\n");
-			return 0;
-		}
-		pr_info("ksu-shim: 引导成功 kallsyms_lookup_name\n");
-	}
-	return fn(name);
-}
-
-int kallsyms_lookup_size_offset(unsigned long addr, unsigned long *symbolsize,
-				unsigned long *offset)
-{
-	static ksu_klso_t fn;
-
-	if (unlikely(!fn))
-		fn = (ksu_klso_t)kallsyms_lookup_name("kallsyms_lookup_size_offset");
-	if (unlikely(!fn))
-		return 0;
-	return fn(addr, symbolsize, offset);
-}
-
-const char *kallsyms_lookup(unsigned long addr, unsigned long *symbolsize,
-			    unsigned long *offset, char **modname, char *namebuf)
-{
-	static ksu_kl_t fn;
-
-	if (unlikely(!fn))
-		fn = (ksu_kl_t)kallsyms_lookup_name("kallsyms_lookup");
-	if (unlikely(!fn))
-		return NULL;
-	return fn(addr, symbolsize, offset, modname, namebuf);
-}
-
-int kallsyms_on_each_symbol(int (*cb)(void *, const char *, unsigned long), void *data)
-{
-	static ksu_koes_t fn;
-
-	if (unlikely(!fn))
-		fn = (ksu_koes_t)kallsyms_lookup_name("kallsyms_on_each_symbol");
-	if (unlikely(!fn))
-		return -ENOENT;
-	return fn(cb, data);
-}
+/* ==================================================================
+ * KSU_KALLSYMS_FROM_KSUINIT
+ * 这里原本定义了 kallsyms_lookup_name / kallsyms_lookup /
+ * kallsyms_lookup_size_offset / kallsyms_on_each_symbol 四个"函数壳"，
+ * 靠 register_kprobe 引导拿地址（本内核 KALLSYMS_ALL=n，数据符号不可得，
+ * 但【函数】都在 /proc/kallsyms 里）。
+ *
+ * 结论：ksuinit（官方 LKM 引导器）在装载模块时，会自己读 /proc/kallsyms，
+ * 把模块里所有【未定义符号】就地改写成绝对地址（SHN_ABS）——根本不做重定位，
+ * 因此"内核没导出"完全无所谓。我们只要把这四个名字留作【未定义符号】即可，
+ * 由 ksuinit 解析；不再需要任何 kprobe / 内存扫描。
+ * ================================================================== */
 
 /* ==================================================================
  * ② 函数壳
@@ -562,6 +511,148 @@ static unsigned long ksu_resolve_tracepoint_sys_enter(void)
 	return 0;
 }
 
+
+/* ==================================================================
+ * 精确地址路径：设备链接期地址 + KASLR slide
+ *
+ * 地址来源：设备【原厂】vmlinux（从 boot_a 的 xz payload 解出 → vmlinux-to-elf
+ *           恢复符号表），每个地址都经过双重交叉验证：
+ *             init_mm              ← 4/4 同名函数共同引用
+ *             selinux_state        ← 5/5 同名函数共同引用
+ *             selinux_blob_sizes   ← 2 函数 + 内容校验
+ *             mntns_operations     ← 3/3 函数 + 回调指针落在 +0x18..+0x30
+ *             __tracepoint_sys_enter ← __traceiter_sys_enter 引用 + .name=="sys_enter"
+ *
+ * slide = 本模块【已导入】的 _printk 运行时地址 − 它在设备 vmlinux 的链接期地址
+ * （KASLR 平移整个内核镜像，text/data 同幅 ⇒ 该公式对数据符号同样成立）
+ * 任何一步校验不过 → 返回 0 → 自动退回原来的扫描器（安全）。
+ * ================================================================== */
+#define KSU_LINK__printk                 0xffffffff81000650UL
+#define KSU_LINK_init_mm                 0xffffffff8538b380UL
+#define KSU_LINK_selinux_state           0xffffffff85fd6fc8UL
+#define KSU_LINK_selinux_blob_sizes      0xffffffff84f8ec40UL
+#define KSU_LINK_mntns_operations        0xffffffff84d34728UL
+#define KSU_LINK___tracepoint_sys_enter  0xffffffff85509460UL
+/* sys_call_table：6.12 无直接代码引用 ⇒ 用"系统调用函数指针表"指纹求值（23/23 命中）*/
+#define KSU_LINK_sys_call_table          0xffffffff84cf22a0UL
+
+static unsigned long ksu_exact_addr(const char *name, long slide);
+
+static long ksu_kaslr_slide(void)
+{
+	static bool done;
+	static long slide;
+
+	if (!done) {
+		long s = (long)((unsigned long)(void *)&_printk - KSU_LINK__printk);
+
+		/* 合理性检查：KASLR 以 2MB 为粒度、只向上平移 */
+		slide = (s >= 0 && s <= 0x40000000L && (s % 0x200000L) == 0) ? s : -1;
+		done = true;
+		if (slide < 0)
+			pr_warn("ksu-shim: slide 不可信(%ld)，走扫描兜底\n", slide);
+	}
+	return slide;
+}
+
+static bool ksu_valid_blob_sizes_exact(unsigned long a)
+{
+	int v[8];
+	int i;
+
+	if (!ksu_is_kptr(a) || ksu_is_text(a))
+		return false;
+	if (ksu_safe_read(v, (const void *)a, sizeof(v)) < 0)
+		return false;
+	for (i = 0; i < 8; i++)
+		if (v[i] < 0 || v[i] > 0x10000)
+			return false;
+	return true;
+}
+
+static bool ksu_valid_mntns_ops_exact(unsigned long a)
+{
+	unsigned long v;
+	int i;
+
+	if (!ksu_is_kptr(a) || ksu_is_text(a))
+		return false;
+	for (i = 3; i <= 6; i++) {	/* get/put/install/owner 在 +0x18..+0x30 */
+		if (ksu_safe_read(&v, (const void *)(a + 8 * i), 8) < 0)
+			return false;
+		if (!ksu_is_text(v))
+			return false;
+	}
+	return true;
+}
+
+static bool ksu_valid_tp_sys_enter_exact(unsigned long a)
+{
+	unsigned long nm = 0;
+
+	if (!ksu_is_kptr(a) || ksu_is_text(a))
+		return false;
+	if (ksu_safe_read(&nm, (const void *)a, 8) < 0)	/* struct tracepoint.name 在 +0 */
+		return false;
+	if (!ksu_is_kptr(nm))
+		return false;
+	return ksu_str_eq(nm, "sys_enter");
+}
+
+
+static bool ksu_valid_sys_call_table(unsigned long a)
+{
+	unsigned long v0 = 0, v1 = 0;
+
+	if (!ksu_is_kptr(a) || ksu_is_text(a))
+		return false;
+	if (ksu_safe_read(&v0, (const void *)a, 8) < 0)
+		return false;
+	if (ksu_safe_read(&v1, (const void *)(a + 8), 8) < 0)
+		return false;
+	/* 表项必须是内核文本指针（syscall 处理函数） */
+	return ksu_is_text(v0) && ksu_is_text(v1);
+}
+
+static const struct {
+	const char *name;
+	unsigned long link;
+	bool (*valid)(unsigned long);
+} ksu_exact_syms[] = {
+	{ "init_mm",                KSU_LINK_init_mm,                ksu_valid_init_mm },
+	{ "selinux_state",          KSU_LINK_selinux_state,          ksu_valid_selinux_state },
+	{ "selinux_blob_sizes",     KSU_LINK_selinux_blob_sizes,     ksu_valid_blob_sizes_exact },
+	{ "mntns_operations",       KSU_LINK_mntns_operations,       ksu_valid_mntns_ops_exact },
+	{ "__tracepoint_sys_enter", KSU_LINK___tracepoint_sys_enter, ksu_valid_tp_sys_enter_exact },
+	{ "sys_call_table",         KSU_LINK_sys_call_table,        ksu_valid_sys_call_table },
+};
+
+static unsigned long ksu_exact_addr(const char *name, long slide)
+{
+	int i;
+
+	if (slide < 0)
+		return 0;
+	for (i = 0; i < ARRAY_SIZE(ksu_exact_syms); i++) {
+		unsigned long a;
+
+		if (strcmp(ksu_exact_syms[i].name, name) != 0)
+			continue;
+		a = ksu_exact_syms[i].link + (unsigned long)slide;
+		if (ksu_exact_syms[i].valid && !ksu_exact_syms[i].valid(a))
+			return 0;
+		return a;
+	}
+	return 0;
+}
+
+
+/* 只查精确表；命中返回真地址，否则 0。给 KSU 的 find_kernel_symbol_exact 用。 */
+unsigned long ksu_shim_exact_lookup(const char *name)
+{
+	return ksu_exact_addr(name, ksu_kaslr_slide());
+}
+
 /* ================= 统一入口 ================= */
 
 static struct {
@@ -588,6 +679,8 @@ unsigned long ksu_shim_data_addr(const char *name)
 		if (!ksu_data_resolvers[i].done) {
 			ksu_data_resolvers[i].done = true;
 			addr = find_kernel_symbol_exact(name);   /* 若将来开了 KALLSYMS_ALL */
+			if (!addr)
+				addr = ksu_exact_addr(name, ksu_kaslr_slide());   /* 设备链接期地址 + slide */
 			if (!addr)
 				addr = ksu_data_resolvers[i].resolve();
 			ksu_data_resolvers[i].cached = addr;

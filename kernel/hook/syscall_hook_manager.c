@@ -12,7 +12,8 @@
 #include <linux/compat.h>
 
 #include "arch.h"
-#include "klog.h" // IWYU pragma: keep
+#include "klog.h"
+extern void ksu_blog(const char *fmt, ...);   /* KSU_X86_BOOT_LOG */ // IWYU pragma: keep
 #include "hook/syscall_hook_manager.h"
 #include "hook/tp_marker.h"
 #include "feature/sucompat.h"
@@ -58,6 +59,7 @@ static void destroy_kretprobe(struct kretprobe **rp_ptr)
 
 static int syscall_regfunc_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
+    { static int n; if (n < 3) { n++; ksu_blog("  regfunc: called (another tracepoint registering)\n"); } }
     unsigned long flags;
     ksu_tp_marker_lock(&flags);
     if (ksu_tp_marker_reg_count() < 1) {
@@ -96,6 +98,7 @@ static struct kretprobe *syscall_unregfunc_rp = NULL;
 // sys_enter handler: redirect hooked syscalls to the dispatcher
 static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 {
+    { static int n; if (n < 8) { n++; ksu_blog("  tp: sys_enter id=%ld hooked=%d\n", id, (int)ksu_has_syscall_hook((int)id)); } }
 #if defined(__x86_64__)
     if (unlikely(in_compat_syscall()))
 #elif defined(__aarch64__) || defined(__riscv)
@@ -125,7 +128,7 @@ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 }
 #endif
 
-void __init ksu_syscall_hook_manager_init(void)
+void  ksu_syscall_hook_manager_init(void)
 {
     int ret;
     pr_info("hook_manager: ksu_hook_manager_init called\n");

@@ -3,13 +3,41 @@
 #include "../syscall_hook.h"
 
 #include <linux/kallsyms.h>
+#include <linux/vmalloc.h>
+#include <linux/moduleloader.h>
+#include <asm/set_memory.h>
 #include <linux/mutex.h>
 #include <linux/nospec.h>
+#include <linux/uaccess.h>
 #include <asm/cacheflush.h>
 #include "infra/symbol_resolver.h"
 #include "../patch_memory.h"
 #include "arch.h"
-#include "klog.h" // IWYU pragma: keep
+#include "klog.h"
+extern void ksu_blog(const char *fmt, ...);
+
+/* ============================================================================
+ * [KSU-X86-PORT] 本文件的非上游改动清单（H3C MegaBook / MegaOS / 6.12.30）
+ *
+ * 约定：所有非上游改动一律以 [KSU-X86-PORT] 标注，并写清
+ *       「改了什么 / 为什么（证据）/ 不改会怎样」；改逻辑时保留原逻辑注释，便于回退。
+ *
+ * 关键背景（均为设备实测，详见《踩坑记录.md》）：
+ *  1) 6.12 的 x64_sys_call 是【生成的 switch】，不引用 sys_call_table；
+ *     但 sys_call_table 本身仍是正确的（[0]=__x64_sys_read，[1]=__x64_sys_write）。
+ *  2) 入口前 4 字节运行时有两种形态：endbr64，或被 IBT 封存成 4 字节 NOP
+ *     （实测 66 0f 1f 00）⇒ 必须无条件跳过 4 字节，否则 12 字节窗口整体错位。
+ *  3) 补丁必须落在指令边界：+4 处为 nopl(5) + mov(7) = 12 字节；14 会切进 cmp。
+ *  4) 内核开了 IBT：蹦床需 endbr64 开头；回跳函数中间只能用 ret，不能间接 jmp。
+ *  5) 被覆盖的 mov $-ENOSYS,%rax 决定默认返回值 ⇒ 回跳前必须保留 rax。
+ *
+ * 改动列表：
+ *  - KSU_X64_PATCH_LEN=12；补丁改为 movabs rax,target + jmp rax
+ *  - prepare_abs_jump / install_abs_jump 拆分：先校验/备份，再安装
+ *  - 原地蹦床（vmalloc + set_memory_x）：endbr64 + 12B 回放 + push/movabs/xchg/ret
+ *  - 非 dispatcher 调用走蹦床（交回内核自己的 switch），不再自行用表派发
+ *  - ksu_blog() 双通道日志（persistent@512KB / /data/local/tmp）
+ * ========================================================================== */
 
 sys_call_ptr_t *ksu_syscall_table = NULL;
 int ksu_dispatcher_nr = -1;
@@ -35,6 +63,7 @@ static int hooked_count = 0;
 
 static int patch_syscall_table(int nr, sys_call_ptr_t fn)
 {
+    ksu_blog("   patch_syscall_table: enter nr=%d\n", nr);
     if (ksu_syscall_table == NULL)
         return -ENOENT;
     if (nr < 0 || nr >= __NR_syscalls)
@@ -43,6 +72,7 @@ static int patch_syscall_table(int nr, sys_call_ptr_t fn)
     pr_info("patch syscall %d, 0x%lx -> 0x%lx\n", nr, (unsigned long)READ_ONCE(ksu_syscall_table[nr]),
             (unsigned long)fn);
 
+    ksu_blog("   patch_syscall_table: about to call ksu_patch_text dst=%lx\n", (unsigned long)&ksu_syscall_table[nr]);
     if (ksu_patch_text(&ksu_syscall_table[nr], &fn, sizeof(fn), KSU_PATCH_TEXT_FLUSH_DCACHE)) {
         pr_err("patch syscall %d failed\n", nr);
         return -EIO;
@@ -55,6 +85,7 @@ static int patch_syscall_table(int nr, sys_call_ptr_t fn)
 // save original to *old, and record for restoration at module exit.
 void ksu_syscall_table_hook(int nr, sys_call_ptr_t fn, sys_call_ptr_t *old)
 {
+    ksu_blog("   table_hook: enter nr=%d\n", nr);
     if (ksu_syscall_table == NULL)
         return;
     if (nr < 0 || nr >= __NR_syscalls) {
@@ -62,7 +93,9 @@ void ksu_syscall_table_hook(int nr, sys_call_ptr_t fn, sys_call_ptr_t *old)
         return;
     }
 
+    ksu_blog("   table_hook: locking\n");
     mutex_lock(&hooked_entries_lock);
+    ksu_blog("   table_hook: locked\n");
 
     sys_call_ptr_t orig = READ_ONCE(ksu_syscall_table[nr]);
     if (old)
@@ -87,7 +120,9 @@ void ksu_syscall_table_hook(int nr, sys_call_ptr_t fn, sys_call_ptr_t *old)
         }
     }
 
+    ksu_blog("   table_hook: calling patch_syscall_table\n");
     patch_syscall_table(nr, fn);
+    ksu_blog("   table_hook: patch_syscall_table returned\n");
 
     mutex_unlock(&hooked_entries_lock);
 }
@@ -149,6 +184,7 @@ static int ksu_find_ni_syscall_slots(int *out_slots, int max_slots)
 // otherwise it's a spurious call — return -ENOSYS.
 static long __nocfi ksu_syscall_dispatcher(const struct pt_regs *regs)
 {
+    { static int n; if (n < 5) { n++; ksu_blog("  dispatcher: entered orig_ax=%ld ax=%ld\n", (long)regs->orig_ax, (long)regs->ax); } }
     if (regs->orig_ax != ksu_dispatcher_nr)
         return -ENOSYS;
 
@@ -208,10 +244,94 @@ bool ksu_has_syscall_hook(int nr)
 // all of GKI kernel except 5.10
 #ifdef CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER
 static void *x64_sys_call_patch_addr;
-static char x64_sys_call_patch_orig_insn[14];
+/* [KSU-X86-PORT] x64_sys_call 的真实指令边界（由设备 vmlinux 反汇编确认）：
+ *   +0x00  nopl 0x0(%rax,%rax,1)   5 B
+ *   +0x05  mov  $-ENOSYS,%rax      7 B   -> 12 B 处正好是下一条指令起点
+ *   +0x0c  cmp  $0xbd,%esi         6 B
+ * 所以补丁长度必须是 12；14 会切在 cmp 中间（回放必然出错）。
+ */
+#define KSU_X64_PATCH_LEN 12
+
+static void *ksu_tramp;                /* 原地蹦床：endbr64 + 12B 回放 + ret 回跳 */
+static char x64_sys_call_patch_orig_insn[KSU_X64_PATCH_LEN];
+
+
+/* ================= KSU 黑匣子：记录最近的 syscall nr =================
+ * 目的：崩溃时能知道"内核正在处理哪个系统调用"（崩溃点常在这一层之下）。
+ * 做法：每次 syscall 写入内存环形缓冲（无 I/O）；每秒把最近 64 个 nr 落盘一次。
+ * =================================================================== */
+#define KSU_SYSNO_RING 64
+static u32 ksu_sysno_ring[KSU_SYSNO_RING];
+static u32 ksu_sysno_idx;
+static u32 ksu_sysno_total;
+static struct delayed_work ksu_sysno_work;
+static bool ksu_sysno_work_started;
+
+static void ksu_sysno_flush_now(void);
+
+static void ksu_sysno_flush(struct work_struct *w)
+{
+	char b[640];
+	int n = 0, i;
+	unsigned int start;
+
+	n += snprintf(b + n, sizeof(b) - n, "SYSCALLS total=%u idx=%u ring:", ksu_sysno_total, ksu_sysno_idx);
+	start = (ksu_sysno_idx >= KSU_SYSNO_RING) ? (ksu_sysno_idx - KSU_SYSNO_RING) : 0;
+	for (i = 0; i < KSU_SYSNO_RING && n < (int)sizeof(b) - 16; i++) {
+		u32 v = ksu_sysno_ring[(start + i) % KSU_SYSNO_RING];
+		n += snprintf(b + n, sizeof(b) - n, " %u", v);
+	}
+	n += snprintf(b + n, sizeof(b) - n, "\n");
+	ksu_blog("%s", b);
+	schedule_delayed_work(&ksu_sysno_work, msecs_to_jiffies(300));
+}
+
+/* KSU 关心的系统调用：立即同步落盘一次（这些调用很稀少，开销可忽略）*/
+static void ksu_sysno_flush_now(void)
+{
+	if (ksu_sysno_work_started)
+		ksu_sysno_flush(NULL);
+}
 
 static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
 {
+    /* KSU 只关心被 tracepoint 改写成 dispatcher 槽位的调用；其余交回内核 */
+    if ((int)nr == ksu_dispatcher_nr) {
+        ksu_sysno_ring[ksu_sysno_idx % KSU_SYSNO_RING] = nr;
+        ksu_sysno_idx++; ksu_sysno_total++;
+        return ksu_syscall_dispatcher(regs);
+    }
+    /* [KSU-X86-PORT] 其余调用：走原地蹦床（回放被覆盖的 12 字节后跳回
+     * x64_sys_call+12），由内核自己的 switch 完成派发。
+     * 上游/KSU-Next 在这里用 ksu_syscall_table[nr](regs) 自行派发；
+     * 本机实测该路径会在管理器启动时整机 panic（NR/表项与生成 switch 不完全一致），
+     * 因此改为蹦床，完全不碰 sys_call_table。 */
+    if (ksu_tramp)
+        return ((long (*)(const struct pt_regs *, unsigned int))ksu_tramp)(regs, nr);
+    return -ENOSYS;
+}
+
+static long my_x64_sys_call_unused(const struct pt_regs *regs, unsigned int nr)
+{
+    /* 黑匣子：无 I/O，只写内存 */
+    ksu_sysno_ring[ksu_sysno_idx % KSU_SYSNO_RING] = nr;
+    ksu_sysno_idx++;
+    ksu_sysno_total++;
+    if (!ksu_sysno_work_started) {
+        ksu_sysno_work_started = true;
+        INIT_DELAYED_WORK(&ksu_sysno_work, ksu_sysno_flush);
+        schedule_delayed_work(&ksu_sysno_work, msecs_to_jiffies(300));
+    }
+    /* 47=recvfrom? 无；这里列 KSU 关心的：113 setreuid,117 setresuid,157 prctl,
+     * 169 reboot,59 execve,322 execveat,269 faccessat,439 faccessat2 */
+    switch (nr) {
+    case 59: case 322: case 113: case 117: case 157: case 169: case 269: case 439:
+        ksu_blog("SYSCALL-INTERESTING nr=%u\n", nr);
+        ksu_sysno_flush_now();
+        break;
+    default:
+        break;
+    }
     return ksu_syscall_table[nr](regs);
 }
 
@@ -258,54 +378,190 @@ static void __nocfi my_do_syscall_64(struct pt_regs *regs, int nr)
 #endif
 #endif
 
-static void patch_abs_jump(const char *sym, void **patch_addr, void *target, char backup[14])
+/* 解析符号、校验前导字节、备份原始 12 字节；本函数不写内核代码。
+ * 返回 0 表示可以安全打补丁。 */
+static int prepare_abs_jump(const char *sym, void **patch_addr, char backup[KSU_X64_PATCH_LEN])
 {
     *patch_addr = (void *)find_kernel_symbol_exact(sym);
     pr_info("%s=0x%lx\n", sym, (unsigned long)*patch_addr);
-    if (*patch_addr) {
-        pr_info("patching %s\n", sym);
-        // skip endbr64
-        static const char endbr64_insn[] = {
-            // clang-format off
-            0xf3, 0x0f, 0x1e, 0xfa
-            // clang-format on
-        };
-        if (memcmp((void *)*patch_addr, endbr64_insn, sizeof(endbr64_insn)) == 0) {
-            pr_info("%s: skip endbr64\n", sym);
-            *patch_addr = (void *)((char *)(*patch_addr) + 4);
-        }
+    if (!*patch_addr)
+        return -ENOENT;
+
+    /* [KSU-X86-PORT] 进入函数时先跳过开头的 4 字节。注意它有两种形态：
+     *   - 静态 vmlinux：endbr64 (f3 0f 1e fa)
+     *   - 运行时：IBT 封存会把非间接目标函数的 endbr64 替换成 4 字节 NOP
+     *     (66 0f 1f 00)。二者都是 4 字节，跳过即可。
+     * 这一步必须无条件执行 —— 之前按 endbr64 匹配失败就不跳，
+     * 结果从 +0 开始比对，12 字节窗口整体错位（日志实测）。 */
+    static const unsigned char entry_forms[][4] = {
         // clang-format off
-        char buf[] = {
-            // jmp *(%rip) = addr
-            0xff, 0x25, 0x00, 0x00, 0x00, 0x00,
-            // addr: .quad 0
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        };
+        { 0xf3, 0x0f, 0x1e, 0xfa },   /* endbr64 */
+        { 0x66, 0x0f, 0x1f, 0x00 },   /* IBT 封存后的 4 字节 NOP */
         // clang-format on
-        *((void **)(buf + 6)) = target;
-        memcpy(backup, *patch_addr, sizeof(buf));
-        int ret = ksu_patch_text(*patch_addr, buf, sizeof(buf), KSU_PATCH_TEXT_FLUSH_ICACHE);
-        if (ret) {
-            pr_err("patch %s err: %d\n", sym, ret);
+    };
+    if (memcmp((void *)*patch_addr, entry_forms[0], 4) == 0) {
+        pr_info("%s: skip endbr64\n", sym);
+    } else if (memcmp((void *)*patch_addr, entry_forms[1], 4) == 0) {
+        pr_info("%s: skip sealed endbr64 (nop)\n", sym);
+    } else {
+        pr_err("%s: unexpected entry bytes %02x %02x %02x %02x, abort\n", sym,
+               ((unsigned char *)*patch_addr)[0], ((unsigned char *)*patch_addr)[1],
+               ((unsigned char *)*patch_addr)[2], ((unsigned char *)*patch_addr)[3]);
+        *patch_addr = NULL;
+        return -EINVAL;
+    }
+    *patch_addr = (void *)((char *)(*patch_addr) + 4);
+    /* 只对 x64_sys_call 做严格的前导字节校验：万一内核版本/编译选项不同，
+     * 宁可放弃 hook 也绝不在指令中间打补丁（否则必崩）。 */
+    if (strcmp(sym, "x64_sys_call") == 0) {
+        static const unsigned char expect[KSU_X64_PATCH_LEN] = {
+            // nopl 0x0(%rax,%rax,1) ; mov $-ENOSYS,%rax
+            0x0f, 0x1f, 0x44, 0x00, 0x00, 0x48, 0xc7, 0xc0, 0xda, 0xff, 0xff, 0xff,
+        };
+        if (memcmp(*patch_addr, expect, sizeof(expect)) != 0) {
+            pr_err("%s: prologue mismatch (%02x %02x %02x ...), abort hook\n", sym,
+                   ((unsigned char *)*patch_addr)[0], ((unsigned char *)*patch_addr)[1],
+                   ((unsigned char *)*patch_addr)[2]);
             *patch_addr = NULL;
+            return -EINVAL;
         }
+        pr_info("%s: prologue verified (12-byte boundary)\n", sym);
+    }
+    memcpy(backup, *patch_addr, KSU_X64_PATCH_LEN);
+    return 0;
+}
+
+/* [KSU-X86-PORT] 写入 12 字节补丁：movabs rax, target ; jmp rax
+ * （上游用的是 14 字节 `jmp *(%rip)`，在本内核会切在 cmp 指令中间）*/
+static int install_abs_jump(void *patch_addr, void *target)
+{
+    // clang-format off
+    char buf[KSU_X64_PATCH_LEN] = {
+        0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // movabs rax, imm64
+        0xff, 0xe0,                                                   // jmp rax
+    };
+    // clang-format on
+    *(unsigned long *)(buf + 2) = (unsigned long)target;
+    return ksu_patch_text(patch_addr, buf, sizeof(buf), KSU_PATCH_TEXT_FLUSH_ICACHE);
+}
+
+static void patch_abs_jump(const char *sym, void **patch_addr, void *target, char backup[KSU_X64_PATCH_LEN])
+{
+    if (prepare_abs_jump(sym, patch_addr, backup) != 0)
+        return;
+    int ret = install_abs_jump(*patch_addr, target);
+    if (ret) {
+        pr_err("patch %s err: %d\n", sym, ret);
+        *patch_addr = NULL;
     }
 }
 
-void __init __nocfi ksu_syscall_hook_init(void)
+#ifdef KSU_X86_DIAG
+/* 只读诊断：把关键地址/字节写进 persistent 日志，不做任何修改 */
+static void ksu_diag_dump(const char *tag, unsigned long addr)
 {
+    unsigned char b[16];
+    char line[3 * 16 + 1];
+    int i, n = 0;
+
+    if (!addr) {
+        ksu_blog("DIAG %s = NULL\n", tag);
+        return;
+    }
+    if (copy_from_kernel_nofault(b, (void *)addr, sizeof(b)) != 0) {
+        ksu_blog("DIAG %s=%lx READ_FAIL\n", tag, addr);
+        return;
+    }
+    for (i = 0; i < 16; i++)
+        n += snprintf(line + n, sizeof(line) - n, "%02x ", b[i]);
+    ksu_blog("DIAG %s=%lx bytes=%s\n", tag, addr, line);
+}
+#endif
+
+void  __nocfi ksu_syscall_hook_init(void)
+{
+#ifdef KSU_X86_SKIP_SYSCALL_HOOK
+    pr_info("ksu-shim: ksu_syscall_hook_init SKIPPED (bisect mode)\n");
+    return;
+#endif
     int ni_slot;
+
+#ifdef KSU_X86_DIAG
+    ksu_blog("DIAG printk=%lx link_const=%lx diff=%ld\n", (unsigned long)&_printk,
+             0xffffffff81000650UL, (long)((unsigned long)&_printk - 0xffffffff81000650UL));
+    ksu_blog("DIAG xx64_sys_call=%lx\n", kallsyms_lookup_name("x64_sys_call"));
+    ksu_diag_dump("x64_sys_call", kallsyms_lookup_name("x64_sys_call"));
+    ksu_blog("DIAG init_mm(shim)=%lx\n", find_kernel_symbol_exact("init_mm"));
+#endif
 
     memset(syscall_hooks, 0, sizeof(syscall_hooks));
 
     ksu_syscall_table = (sys_call_ptr_t *)ksu_resolve_symbol_for_functable_hook("sys_call_table");
+    ksu_blog("  hook: sub-step sys_call_table=%lx\n", (unsigned long)ksu_syscall_table);
     pr_info("sys_call_table=0x%lx\n", (unsigned long)ksu_syscall_table);
 
-    if (!ksu_syscall_table)
+    if (!ksu_syscall_table) {
+        ksu_blog("  hook: sys_call_table NULL -> return\n");
         return;
+    }
+
+#ifdef KSU_X86_DIAG
+    ksu_diag_dump("sys_call_table", (unsigned long)ksu_syscall_table);
+#endif
 
 #ifdef CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER
-    patch_abs_jump("x64_sys_call", &x64_sys_call_patch_addr, my_x64_sys_call, x64_sys_call_patch_orig_insn);
+#ifndef KSU_X86_SKIP_ABSJUMP
+    ksu_blog("  hook: sub-step prepare_abs_jump BEGIN\n");
+    if (prepare_abs_jump("x64_sys_call", &x64_sys_call_patch_addr, x64_sys_call_patch_orig_insn) == 0) {
+        /* [KSU-X86-PORT] 先建蹦床，再打补丁；否则别的 CPU 可能在本页就绪前跳进来。
+         * 分配用 vmalloc + set_memory_x（本机没有 module_alloc 符号，见踩坑记录 1.5）*/
+        unsigned char *t = (unsigned char *)vmalloc(PAGE_SIZE);
+        if (!t) {
+            ksu_blog("  hook: trampoline vmalloc FAILED -> skip absjump\n");
+            x64_sys_call_patch_addr = NULL;
+        } else {
+            unsigned char *p = t;
+            unsigned long cont = (unsigned long)x64_sys_call_patch_addr + KSU_X64_PATCH_LEN;
+
+            /* IBT：间接调用进入本页，必须以 endbr64 开头 */
+            *p++ = 0xf3; *p++ = 0x0f; *p++ = 0x1e; *p++ = 0xfa;
+            /* 回放被覆盖的 12 字节（nopl + mov $-ENOSYS,%rax） */
+            memcpy(p, x64_sys_call_patch_orig_insn, KSU_X64_PATCH_LEN);
+            p += KSU_X64_PATCH_LEN;
+            /* 回跳函数中间不能用间接 jmp（IBT 要求目标有 endbr64），
+             * 用 ret：push rax / movabs rax,cont / xchg rax,(rsp) / ret，
+             * 既绕过 IBT，又完整保留 rax（原函数用它预置 -ENOSYS）。 */
+            *p++ = 0x50;                                          /* push rax */
+            *p++ = 0x48; *p++ = 0xb8;                             /* movabs rax, cont */
+            *(unsigned long *)p = cont; p += 8;
+            *p++ = 0x48; *p++ = 0x87; *p++ = 0x04; *p++ = 0x24;   /* xchg rax,(rsp) */
+            *p++ = 0xc3;                                          /* ret */
+
+            if (set_memory_x((unsigned long)t, 1) != 0) {
+                ksu_blog("  hook: set_memory_x FAILED -> skip absjump\n");
+                vfree(t);
+                x64_sys_call_patch_addr = NULL;
+            } else {
+                ksu_tramp = t;
+                ksu_blog("  hook: trampoline built @%lx cont=%lx len=%u\n",
+                         (unsigned long)t, cont, (unsigned int)(p - t));
+                if (install_abs_jump(x64_sys_call_patch_addr, my_x64_sys_call) == 0) {
+                    ksu_blog("  hook: sub-step patch_abs_jump DONE addr=%lx\n",
+                             (unsigned long)x64_sys_call_patch_addr);
+                } else {
+                    ksu_blog("  hook: patch_abs_jump FAILED\n");
+                    ksu_tramp = NULL;
+                    vfree(t);
+                    x64_sys_call_patch_addr = NULL;
+                }
+            }
+        }
+    } else {
+        ksu_blog("  hook: prepare_abs_jump FAILED -> absjump skipped\n");
+    }
+#else
+    pr_info("ksu-shim: patch_abs_jump(x64_sys_call) SKIPPED (bisect)\n");
+#endif
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
     syscall_enter_from_user_mode_fn = find_kernel_symbol_exact("syscall_enter_from_user_mode");
     syscall_exit_to_user_mode_fn = find_kernel_symbol_exact("syscall_exit_to_user_mode");
@@ -318,13 +574,21 @@ void __init __nocfi ksu_syscall_hook_init(void)
 #endif
 
     // Find one ni_syscall slot for the dispatcher
+    ksu_blog("  hook: sub-step find_ni_syscall_slots BEGIN\n");
     if (ksu_find_ni_syscall_slots(&ni_slot, 1) < 1) {
         pr_err("failed to find ni_syscall slot for dispatcher\n");
         return;
     }
 
+    ksu_blog("  hook: sub-step ni_slot=%d\n", ni_slot);
     ksu_dispatcher_nr = ni_slot;
+    ksu_blog("  hook: sub-step table_hook BEGIN\n");
+#ifndef KSU_X86_SKIP_TABLE_HOOK
     ksu_syscall_table_hook(ksu_dispatcher_nr, (sys_call_ptr_t)ksu_syscall_dispatcher, NULL);
+#else
+    ksu_blog("  hook: table_hook SKIPPED (absjump already covers 6.12 dispatcher)\n");
+#endif
+    ksu_blog("  hook: sub-step table_hook DONE\n");
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
 }
 

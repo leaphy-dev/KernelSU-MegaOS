@@ -57,6 +57,15 @@ struct ksu_lookup_symbol_ctx {
 unsigned long __nocfi find_kernel_symbol_exact(const char *symbol_name)
 {
     unsigned long addr = 0;
+    extern unsigned long ksu_shim_exact_lookup(const char *name);
+
+    /* 本设备内核 KALLSYMS_ALL=n：数据符号不在 /proc/kallsyms 里，
+     * 由 shim 用【设备链接期地址 + KASLR slide】精确提供（如 sys_call_table）。*/
+    {
+        unsigned long exact = ksu_shim_exact_lookup(symbol_name);
+        if (exact)
+            return exact;
+    }
 #if HAVE_ON_EACH_MATCH_SYMBOL
     if (likely(kallsyms_on_each_match_symbol_fn)) {
         kallsyms_on_each_match_symbol_fn(find_kernel_symbol_exact_cb, symbol_name, &addr);
@@ -172,8 +181,12 @@ void *ksu_resolve_symbol_for_functable_hook(const char *symbol_name)
 #endif
 }
 
-void __init ksu_init_symbol_resolver()
+void  ksu_init_symbol_resolver()
 {
+#ifdef KSU_X86_SKIP_SYMBOL_RESOLVER_INIT
+    pr_info("ksu-shim: ksu_init_symbol_resolver SKIPPED (kallsyms_lookup_name path only)\n");
+    return;
+#endif
 #if !ALWAYS_HAVE_ON_EACH_SYMBOL
     kallsyms_on_each_symbol_fn = find_kernel_symbol_exact("kallsyms_on_each_symbol");
     if (!kallsyms_on_each_symbol_fn) {

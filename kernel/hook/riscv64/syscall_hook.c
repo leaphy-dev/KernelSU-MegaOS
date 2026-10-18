@@ -117,7 +117,7 @@ void ksu_syscall_table_unhook(int nr)
     pr_warn("syscall %d not found in hooked entries\n", nr);
 }
 
-static int __init ksu_find_ni_syscall_slots(int *out_slots, int max_slots)
+static int  ksu_find_ni_syscall_slots(int *out_slots, int max_slots)
 {
     unsigned long ni_syscall;
     int i, count = 0;
@@ -196,7 +196,7 @@ bool ksu_has_syscall_hook(int nr)
     return READ_ONCE(syscall_hooks[nr]) != NULL;
 }
 
-void __init ksu_syscall_hook_init(void)
+void  ksu_syscall_hook_init(void)
 {
     int ni_slot;
 
