@@ -2,6 +2,12 @@
 
 # KernelSU
 
+> [!NOTE]
+> **MegaOS port branch:** this branch is an unofficial x86_64 LKM adaptation for the
+> **H3C MegaBook 14** running **MegaOS (Android 14, kernel 6.12.30)**. The stock vendor
+> kernel is left untouched. It is not affiliated with the KernelSU upstream project;
+> see the repository root [`README.md`](../README.md) for release and build details.
+
 <img src="https://kernelsu.org/logo.png" style="width: 96px;" alt="logo">
 
 A kernel-based root solution for Android devices.
