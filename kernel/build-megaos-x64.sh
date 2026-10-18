@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# build-megaos-x86.sh — H3C MegaBook / MegaOS (Android 14, kernel 6.12.30) LKM 构建
+# build-megaos-x64.sh — H3C MegaBook / MegaOS (Android 14, kernel 6.12.30) LKM 构建
 #
 # 这是 H3C MegaBook 14 的专用构建入口（对应上游 kernel/build-all-x64.sh 的位置），
 # 与上游构建脚本的差异（每一条都对应一个实际踩过的坑）：
@@ -13,11 +13,11 @@
 #      CRC 比对，H3C MegaBook 14 没有 __crc_* ⇒ 不清零则 insmod 直接失败
 #
 # 用法：
-#   ./build-megaos-x86.sh                 # 默认（hook manager 启用，无诊断）
-#   ./build-megaos-x86.sh --diag          # 打开 KSU_X86_BLACKBOX（心跳/panic 转储）
-#   ./build-megaos-x86.sh --no-hookmgr    # 跳过 syscall hook manager（排障）
-#   ./build-megaos-x86.sh --out /tmp/kernelsu.ko
-#   KDIR=/path/to/kernel ./build-megaos-x86.sh
+#   ./build-megaos-x64.sh                 # 默认（hook manager 启用，无诊断）
+#   ./build-megaos-x64.sh --diag          # 打开 KSU_X86_BLACKBOX（心跳/panic 转储）
+#   ./build-megaos-x64.sh --no-hookmgr    # 跳过 syscall hook manager（排障）
+#   ./build-megaos-x64.sh --out /tmp/kernelsu.ko
+#   KDIR=/path/to/kernel ./build-megaos-x64.sh
 # ============================================================================
 set -euo pipefail
 
