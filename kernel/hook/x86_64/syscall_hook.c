@@ -25,12 +25,22 @@ extern void ksu_blog(const char *fmt, ...);
 
 extern unsigned long ksu_disp_calls, ksu_disp_bad;   /* [KSU-X86-PORT][DIAG] */
 
-/* [KSU-X86-PORT] 统一入口：先修 ENDBR，再间接调用。 */
+static void *ksu_tramp;                /* 原地蹦床：endbr64 + 12B 回放 + ret 回跳 */
+
+/* [KSU-X86-PORT] 统一入口：优先走原地蹦床，把真实 syscall 交回内核自己的 switch。
+ * 不直接调 sys_call_table：本机表项与生成 switch 不完全一致，
+ * 直接调表曾在管理器启动时整机 panic（见踩坑记录 1.x）。
+ * 蹦床不可用时才退回上游的表调用路径。 */
 long ksu_call_syscall(int nr, const struct pt_regs *regs)
 {
-    sys_call_ptr_t fn = READ_ONCE(ksu_syscall_table[nr]);
-    ksu_ibt_ensure_endbr((void *)fn);
-    return fn(regs);
+    if (ksu_tramp)
+        return ((long (*)(const struct pt_regs *, unsigned int))ksu_tramp)(regs, nr);
+
+    {
+        sys_call_ptr_t fn = READ_ONCE(ksu_syscall_table[nr]);
+        ksu_ibt_ensure_endbr((void *)fn);
+        return fn(regs);
+    }
 }
 
 /* ============================================================================
@@ -258,6 +268,19 @@ bool ksu_has_syscall_hook(int nr)
     return READ_ONCE(syscall_hooks[nr]) != NULL;
 }
 
+/* [KSU-X86-PORT] 直接按 nr 派发。
+ * abs jump 已经在 x64_sys_call 入口拿到了真实 syscall 号，不需要 tracepoint
+ * 先把 orig_ax 改写成 ni_slot 再绕回 dispatcher。
+ * （本机 tracepoint 的 static call 没有被 patch，日志 TPDIAG calls=0 可证。） */
+static long __nocfi ksu_syscall_dispatch_direct(unsigned int nr, const struct pt_regs *regs)
+{
+    ksu_syscall_hook_fn fn = READ_ONCE(syscall_hooks[nr]);
+
+    if (likely(fn))
+        return fn((int)nr, regs);
+    return -ENOSYS;
+}
+
 // https://github.com/torvalds/linux/commit/1e3ad78334a69b36e107232e337f9d693dcc9df2
 // harden syscall table was introduced in 6.9, but it was backported to almost
 // all of GKI kernel except 5.10
@@ -271,7 +294,6 @@ static void *x64_sys_call_patch_addr;
  */
 #define KSU_X64_PATCH_LEN 12
 
-static void *ksu_tramp;                /* 原地蹦床：endbr64 + 12B 回放 + ret 回跳 */
 static char x64_sys_call_patch_orig_insn[KSU_X64_PATCH_LEN];
 
 
@@ -305,9 +327,15 @@ static void ksu_kd_dump(struct kmsg_dumper *d, struct kmsg_dump_detail *detail)
 
 static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
 {
-    /* KSU 只关心被 tracepoint 改写成 dispatcher 槽位的调用；其余交回内核 */
+    /* tracepoint 重定向路径（保留兼容；本机 tracepoint 不生效，见 TPDIAG） */
     if ((int)nr == ksu_dispatcher_nr)
         return ksu_syscall_dispatcher(regs);
+
+    /* [KSU-X86-PORT] 直接派发：abs jump 已拿到真实 nr，不依赖 tracepoint。 */
+    if (unlikely(nr < __NR_syscalls && READ_ONCE(syscall_hooks[nr]) != NULL)) {
+        ksu_disp_calls++;
+        return ksu_syscall_dispatch_direct(nr, regs);
+    }
     /* [KSU-X86-PORT] 管理器驱动 fd 的兜底注入：
      * 正常路径是 hook manager 的 setresuid 钩子（ksu_handle_setresuid）注入 fd；
      * 这里保留 execve 成功后的兜底（某些启动方式不经过 setresuid 钩子）。
