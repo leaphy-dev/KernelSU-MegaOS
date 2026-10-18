@@ -381,10 +381,11 @@ static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
         ksu_sysno_idx++; ksu_sysno_total++;
         return ksu_syscall_dispatcher(regs);
     }
-    /* [KSU-X86-PORT] 管理器驱动 fd 的注入：
-     * 上游由 syscall_hook_manager 在 execve 后注入 fd；我们跳过了 hook manager，
-     * 因此在这里（execve 成功返回时）自己装一次。没有 fd 时管理器的 C++ ksuctl()
-     * 只会扫描 /proc/self/fd，扫不到就直接返回 EBADF ⇒ 界面显示"未安装"。
+    /* [KSU-X86-PORT] 管理器驱动 fd 的兜底注入：
+     * 正常路径是 hook manager 的 setresuid 钩子（ksu_handle_setresuid）注入 fd；
+     * 这里保留 execve 成功后的兜底（某些启动方式不经过 setresuid 钩子）。
+     * 没有 fd 时管理器的 C++ ksuctl() 只扫描 /proc/self/fd，扫不到就直接返回
+     * EBADF ⇒ 界面显示"未安装"。
      * 只对管理器 uid 生效；fd 带 O_CLOEXEC，下次 exec 会自动关闭并重新注入。 */
     if (nr == __NR_execve || nr == __NR_execveat) {
         long ret;
