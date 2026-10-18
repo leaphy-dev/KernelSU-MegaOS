@@ -453,43 +453,9 @@ static void patch_abs_jump(const char *sym, void **patch_addr, void *target, cha
     }
 }
 
-#ifdef KSU_X86_DIAG
-/* 只读诊断：把关键地址/字节写进 persistent 日志，不做任何修改 */
-static void ksu_diag_dump(const char *tag, unsigned long addr)
-{
-    unsigned char b[16];
-    char line[3 * 16 + 1];
-    int i, n = 0;
-
-    if (!addr) {
-        ksu_blog("DIAG %s = NULL\n", tag);
-        return;
-    }
-    if (copy_from_kernel_nofault(b, (void *)addr, sizeof(b)) != 0) {
-        ksu_blog("DIAG %s=%lx READ_FAIL\n", tag, addr);
-        return;
-    }
-    for (i = 0; i < 16; i++)
-        n += snprintf(line + n, sizeof(line) - n, "%02x ", b[i]);
-    ksu_blog("DIAG %s=%lx bytes=%s\n", tag, addr, line);
-}
-#endif
-
 void  __nocfi ksu_syscall_hook_init(void)
 {
-#ifdef KSU_X86_SKIP_SYSCALL_HOOK
-    pr_info("ksu-shim: ksu_syscall_hook_init SKIPPED (bisect mode)\n");
-    return;
-#endif
     int ni_slot;
-
-#ifdef KSU_X86_DIAG
-    ksu_blog("DIAG printk=%lx link_const=%lx diff=%ld\n", (unsigned long)&_printk,
-             0xffffffff81000650UL, (long)((unsigned long)&_printk - 0xffffffff81000650UL));
-    ksu_blog("DIAG xx64_sys_call=%lx\n", kallsyms_lookup_name("x64_sys_call"));
-    ksu_diag_dump("x64_sys_call", kallsyms_lookup_name("x64_sys_call"));
-    ksu_blog("DIAG init_mm(shim)=%lx\n", find_kernel_symbol_exact("init_mm"));
-#endif
 
 #ifdef KSU_X86_BLACKBOX
     ksu_panic_buf = vmalloc(65536);
@@ -516,12 +482,7 @@ void  __nocfi ksu_syscall_hook_init(void)
         return;
     }
 
-#ifdef KSU_X86_DIAG
-    ksu_diag_dump("sys_call_table", (unsigned long)ksu_syscall_table);
-#endif
-
 #ifdef CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER
-#ifndef KSU_X86_SKIP_ABSJUMP
     ksu_blog("  hook: sub-step prepare_abs_jump BEGIN\n");
     if (prepare_abs_jump("x64_sys_call", &x64_sys_call_patch_addr, x64_sys_call_patch_orig_insn) == 0) {
         /* [KSU-X86-PORT] 先建蹦床，再打补丁；否则别的 CPU 可能在本页就绪前跳进来。
@@ -570,9 +531,6 @@ void  __nocfi ksu_syscall_hook_init(void)
     } else {
         ksu_blog("  hook: prepare_abs_jump FAILED -> absjump skipped\n");
     }
-#else
-    pr_info("ksu-shim: patch_abs_jump(x64_sys_call) SKIPPED (bisect)\n");
-#endif
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
     syscall_enter_from_user_mode_fn = find_kernel_symbol_exact("syscall_enter_from_user_mode");
     syscall_exit_to_user_mode_fn = find_kernel_symbol_exact("syscall_exit_to_user_mode");
@@ -593,13 +551,10 @@ void  __nocfi ksu_syscall_hook_init(void)
 
     ksu_blog("  hook: sub-step ni_slot=%d\n", ni_slot);
     ksu_dispatcher_nr = ni_slot;
-    ksu_blog("  hook: sub-step table_hook BEGIN\n");
-#ifndef KSU_X86_SKIP_TABLE_HOOK
-    ksu_syscall_table_hook(ksu_dispatcher_nr, (sys_call_ptr_t)ksu_syscall_dispatcher, NULL);
-#else
-    ksu_blog("  hook: table_hook SKIPPED (absjump already covers 6.12 dispatcher)\n");
-#endif
-    ksu_blog("  hook: sub-step table_hook DONE\n");
+    /* [KSU-X86-PORT] 6.9+ 的 x64_sys_call 是生成的 switch，不查 sys_call_table；
+     * 12 字节 abs jump 已覆盖入口，ni_slot 只作为 dispatcher_nr 使用，不再 patch 表项。
+     * （表项 patch 在 <5.16 的 do_syscall_64 路径上才需要。） */
+    ksu_blog("  hook: table_hook not needed (abs jump covers x64_sys_call)\n");
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
 }
 
